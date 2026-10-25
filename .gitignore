@@ -9,7 +9,6 @@ docs/documentation.md
 data/cache/*.fst
 data/sim_data
 code/
-report/
 figs/*.png
 figs/dag
 .quarto
@@ -20,3 +19,7 @@ outputs/legacy/
 outputs/figs/*.png
 outputs/figs/dag
 legacy
+report/*
+!report/.gitkeep
+CLAUDE.md
+.claude
