@@ -19,3 +19,4 @@ tests/_snaps
 outputs/legacy/
 outputs/figs/*.png
 outputs/figs/dag
+legacy
