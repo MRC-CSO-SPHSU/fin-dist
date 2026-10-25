@@ -1,0 +1,463 @@
+---
+title: "Single point-exposure and outcome analysis"
+subtitle: "Wave 3 with lagged confounders from wave 2 and baseline inputs from wave 1"
+author: "Darwin Del Castillo"
+format:
+  html:
+    number-sections: true
+
+editor: source
+---
+
+# Data
+Data comes from the UK Household Longitudinal Study (UKHLS), also known as Understanding Society. We use data from wave 15, which was collected from 2023 to 2025 as our analytical estimation sample of interest. Secondary analyses will include estimation in wave 3 (2011 -- 2013; closely after the 2008 economic shock) and wave 8 (2016 -- 2018; mid-point in the economic prosperity of the 2010s). This report focuses on the wave 3 analysis.
+
+```{r setup}
+#| output: false
+here::i_am("07_single_treatment.qmd")
+
+pacman::p_load(DiagrammeR,
+               tidyverse,
+               mice,
+               targets,
+               knitr)
+
+# The targets store lives at the project root.
+tar_store <- here::here("_targets")
+
+# The pipeline estimates both SF-12 scales (tar_map over outcome = MCS / PCS).
+scales <- c("MCS", "PCS")
+
+source(here::here("R", "import_cleaning.R"))
+source(here::here("R", "helpers.R"))
+```
+
+# Model specification: One wave of data, time-invariant covariates + lagged confounders + baseline outcome + other confounders
+In this model, we include 1 wave of data (wave 3) and adjust for time-invariant covariates and lagged confounders (from wave 2). The model is specified as follows:
+
+**Notation**
+
+- TI~cov~: Time-invariant covariates:
+    - Sex (`sex_dv`)
+    - Ethnicity (`race_dv`)
+    - Highest educational qualification (`hiqual_dv`)
+- C~l~: lagged confounders from the previous round
+    - Number of dependents (`dnc`, 0, 1, 2+)
+    - Economic benefits receipt (`econ_benefits`, yes/no)
+    - Home ownership status (`home_owner`, yes/no)
+    - Marital status (`mastat_dv`, partnered vs not partnered)
+    - Lagged exposure: financial distress in the previous wave (`econ_dist_bin_lagged`, yes/no)
+    - Lagged values of both SF-12 components (`sf12mcs_dv_lagged` or `sf12pcs_dv_lagged`)
+- C~f~: Other confounders (not lagged)
+    - Region of residence (GOR) (`gor_dv`)
+    - Age (`age_dv`)
+- Job: Employment status (`econ_emp_bin`, employed vs not employed)
+- Inc: Income (`log_income`)
+- Y~0~: the SF-12 component summary at baseline — mental (`sf12mcs_dv_base`) or physical (`sf12pcs_dv_base`).
+
+
+```{r model1}
+#| echo: false
+#| include: true
+#| fig-cap: "Direct Acyclic Graph showing causal assumptions. Note: dashed lines represents unobserved confounders."
+#| fig-width: 10
+#| fig-height: 12
+#| fig-align: center
+#| out-width: 90%
+
+dag_dot <- "
+                  digraph{
+                  graph[rankdir=TB]
+
+                  node[fontname=Arial]
+                  TI [label=<<B><I>TI<SUB>cov</SUB></I></B>>]
+                  Cl [label=<<B><I>Con<SUB>l</SUB></I></B>>]
+                  J [label=<<B><I>Job</I></B>>]
+                  I [label=<<B><I>Inc</I></B>>]
+                  E [label=<<B><I>FD<SUB>t</SUB></I></B>>, 
+                      fontcolor=deepskyblue4, 
+                      color=deepskyblue4]
+                  E0 [label=<<B><I>FD<SUB>t-1</SUB></I></B>>]
+                  Y0 [label=<<B><I>SF12<SUB>b</SUB></I></B>>]
+                  Yi [label=<<B><I>SF12<SUB>t-1</SUB></I></B>>,
+                      style=dashed]
+                  Y1 [label=<<B><I>SF12<SUB>t</SUB></I></B>>,
+                      fontcolor=darkorange2, 
+                      color=darkorange2]
+
+                  E -> Y1
+                  TI -> E, Y1, Cl, Y0
+                  Cl -> E, Y1, J
+                  J -> I, E
+                  I -> E, Y1
+                  Y0 -> Yi, Cl, J
+                  Yi -> Y1
+                  E0 -> E, Yi, J
+
+                  {rank=min; TI}
+                  {rank=same; E, E0}
+                  {rank=same; Cl}
+                  {rank=same; J, I}
+                  {rank=max; Y0, Yi, Y1}
+            }
+                  "
+
+if (knitr::is_html_output()) {
+  DiagrammeR::grViz(dag_dot)
+} else {
+  # PDF and docx cannot embed the htmlwidget, so render the same DOT source to
+  # a file and include that: vector for LaTeX, raster for everything else.
+  ext <- if (knitr::is_latex_output()) "pdf" else "png"
+  dag_file <- here::here("figs", "dag", paste0("dag_single_treatment.", ext))
+  dir.create(dirname(dag_file), recursive = TRUE, showWarnings = FALSE)
+
+  if (requireNamespace("DiagrammeRsvg", quietly = TRUE) &&
+      requireNamespace("rsvg", quietly = TRUE)) {
+    dag_svg <- charToRaw(DiagrammeRsvg::export_svg(DiagrammeR::grViz(dag_dot)))
+    if (ext == "pdf") {
+      rsvg::rsvg_pdf(dag_svg, dag_file)
+    } else {
+      rsvg::rsvg_png(dag_svg, dag_file, width = 2000)
+    }
+  } else if (nzchar(Sys.which("dot"))) {
+    # Fallback for environments without librsvg: the graphviz CLI reads the
+    # same DOT, HTML-like labels included.
+    dot_file <- tempfile(fileext = ".dot")
+    writeLines(dag_dot, dot_file)
+    system2("dot", c(paste0("-T", ext), shQuote(dot_file), "-o", shQuote(dag_file)))
+  } else {
+    stop("Rendering the DAG outside HTML needs DiagrammeRsvg + rsvg, or graphviz `dot` on PATH.")
+  }
+
+  knitr::include_graphics(dag_file)
+}
+```
+
+# Data preparation
+The data is prepared by creating a panel dataset with one row per individual per time point. The report retrieves cached information from `_targets.R` at the repo root.
+
+```{r data_prep}
+#| output: false
+# tar_map() suffixes every target with its outcome scale
+
+wide_data <- list(
+  MCS = tar_read(wide_data_MCS, store = tar_store),
+  PCS = tar_read(wide_data_PCS, store = tar_store)
+)
+
+tmle_results <- list(
+  MCS = tar_read(tmle_results_MCS, store = tar_store),
+  PCS = tar_read(tmle_results_PCS, store = tar_store)
+)
+
+comparison <- list(
+  MCS = tar_read(comparison_MCS, store = tar_store),
+  PCS = tar_read(comparison_PCS, store = tar_store)
+)
+
+cate_results <- list(
+  MCS = tar_read(cate_results_MCS, store = tar_store),
+  PCS = tar_read(cate_results_PCS, store = tar_store)
+)
+
+tmle_sens1_results <- list(
+  MCS = tar_read(tmle_sens1_results_MCS, store = tar_store),
+  PCS = tar_read(tmle_sens1_results_PCS, store = tar_store)
+)
+
+# Stack a per-scale list into one tibble. 
+
+bind_scales <- function(x, f = identity) {
+  dplyr::bind_rows(lapply(x[scales], f), .id = "scale") |>
+    dplyr::mutate(scale = factor(scale, levels = scales))
+}
+```
+
+# Fit TMLE
+We fit a single-exposure TMLE: the exposure is financial distress (`econ_dist_bin_0`) and the outcome is an SF-12 component summary — mental (`sf12mcs_dv_0`) or physical (`sf12pcs_dv_0`). Each of these outcomes was estimated with their own set of confounders. The table reports, pooled across imputations with Rubin's rules and in points on the scale named in each row, the two counterfactual means, the marginal means and the average causal effect.
+
+```{r fit-tmle}
+knitr::kable(
+  bind_scales(tmle_results),
+  digits  = 3,
+  caption = "Pooled point-exposure TMLE estimates by SF-12 scale"
+)
+```
+
+# Sensitivity analysis: g-formula with multiple imputation
+We fit a g-formula model with multiple imputation, using the same model specification as the TMLE above. The following tables compare the counterfactual means and the average causal effect estimated with TMLE and with g-formula MI.
+
+## Counterfactual means
+```{r fit-sensitivity}
+marginals <- bind_scales(comparison, \(x) x$marginal)
+
+knitr::kable(
+  marginals,
+  digits  = 3,
+  caption = "Comparison of pooled point-exposure TMLE and g-formula MI estimates by SF-12 scale."
+)
+```
+
+## Average causal effect
+```{r fit-sensitivity-ate}
+ate <- bind_scales(comparison, \(x) x$ate)
+
+knitr::kable(
+  ate,
+  digits  = 3,
+  caption = "Comparison of pooled point-exposure TMLE and g-formula MI estimates by SF-12 scale."
+)
+```
+
+# Sensitivity 2: TMLE with gbound = 0.025, to explore potential effect of positivity violations
+```{r fit-tmle-gbound}
+knitr::kable(
+  bind_scales(tmle_sens1_results),
+  digits  = 3,
+  caption = "Pooled point-exposure TMLE estimates by SF-12 scale bounding at the propensity score at 0.025 and 0.975."
+)
+```
+
+# Graphs
+## Counterfactual means
+Population mean SF-12 score under each counterfactual exposure scenario, for both component summaries.
+```{r plot-tmle-means}
+#| output: true
+#| include: true
+#| eval: true
+#| fig-cap: "Pooled marginal means of the SF-12 mental (MCS) and physical (PCS) component summaries under financial distress vs no distress (95% CI)."
+#| fig-width: 8
+#| fig-height: 3.5
+
+results_comparison_marginal <- marginals |>
+  pivot_longer(
+    -c(scale, intervention),
+    names_to = c("method", ".value"),
+    names_pattern = "(.*)_(.*)"
+  ) |>
+  mutate(
+    method = factor(method,
+                    levels = c("tmle", "mi"),
+                    labels = c("TMLE", "G-Formula MI")),
+    intervention = factor(intervention,
+                          levels = c("No distress", "Distress"),
+  )) |>
+  ggplot(aes(x = effect, y = intervention,
+             colour = intervention,
+             xmin = ll, xmax = ul)) +
+  theme_bw() +
+  geom_point(size = 2.5) +
+  geom_errorbar(orientation = "y", width = 0.3) +
+  scale_colour_brewer(palette = "Set1",
+                      name = "Intervention",
+                      guide = "legend") +
+  labs(x = "Mean SF-12 score (95% CI)", y = NULL) +
+  facet_grid(method ~ scale, scales = "fixed") +
+  theme(panel.grid.minor = element_blank())
+
+print(results_comparison_marginal)
+
+ggsave(
+  filename = here::here("figs", "comparison_means.png"),
+  plot     = results_comparison_marginal,
+  width = 8, height = 3.5, dpi = 300
+)
+```
+
+## Average causal effect
+```{r plot-tmle-ate}
+#| output: true
+#| include: true
+#| eval: true
+#| fig-cap: "Pooled ATE of the SF-12 mental (MCS) and physical (PCS) component summaries under financial distress vs no distress (95% CI)."
+#| fig-width: 8
+#| fig-height: 3.5
+
+results_comparison_ate <- ate |>
+  pivot_longer(
+    -c(scale, estimand),
+    names_to = c("method", ".value"),
+    names_pattern = "(.*)_(.*)"
+  ) |>
+  mutate(
+    method = factor(method,
+                    levels = c("tmle", "mi"),
+                    labels = c("TMLE", "G-Formula MI")),
+    estimand = factor(estimand,
+                      levels = c("Distress"),
+  )) |>
+  ggplot(aes(x = effect, y = estimand,
+             colour = estimand,
+             xmin = ll, xmax = ul)) +
+  theme_bw() +
+  geom_vline(xintercept = 0, linetype = "dotted", colour = "grey60") +
+  geom_point(size = 2.5) +
+  geom_errorbar(orientation = "y", width = 0.3) +
+  scale_colour_brewer(palette = "Set1",
+                      name = "Estimand",
+                      guide = "legend") +
+  labs(x = "Causal mean difference in SF-12 score (95% CI)
+  (Reference: unexposed)", y = NULL) +
+  facet_grid(method ~ scale, scales = "fixed") +
+  theme(panel.grid.minor = element_blank())
+
+print(results_comparison_ate)
+
+ggsave(
+  filename = here::here("figs", "comparison_ate.png"),
+  plot     = results_comparison_ate,
+  width = 8, height = 3.5, dpi = 300
+)
+```
+
+# Secondary analysis: effect measure modification by intersectional stratum (DR-learner)
+
+The marginal TMLE above gives one population-average effect. This section asks *for whom* the effect differs: additive-scale effect measure modification by intersectional social position. We estimate the *GATE* (group average treatment effect). The estimator consists in a **stratum-specific average causal effect** $\Delta_j$ for each of the 12 strata $j$ (sex × ethnicity × education):
+
+$$\Delta_j = E[\,Y^{a=1} - Y^{a=0} \mid S = j\,]$$
+
+$Y^{a=0}$ is the counterfactual SF-12 score had the person not been in financial distress and $Y^{a=1}$ the counterfactual outcome had they been in financial distress. Each person's doubly robust pseudo-outcome is built from out-of-fold predictions of separately fitted SuperLearner models for the outcome regression and the propensity score, then averaged within stratum by a regression on stratum indicators with heteroskedasticity-consistent (HC2; robust) standard errors. Estimates are pooled across imputations with Rubin's rules.
+
+## Effects by stratum
+
+```{r cate-table}
+#| output: true
+gate <- bind_scales(cate_results, \(x) x$gate)
+
+gate |>
+  arrange(scale, desc(estimate)) |>
+  select(scale, strata_label, n_j_min, n_j_max, pct_exposed, min_g, median_g,
+         share_g_at_bound, estimate, ll, ul) |>
+  knitr::kable(
+    digits    = c(NA, NA, 0, 0, 1, 3, 3, 3, 2, 2, 2),
+    col.names = c("Scale", "Stratum (sex:race:education)", "n (min)", "n (max)",
+                  "% exposed", "min ĝ", "median ĝ", "share ĝ at bound",
+                  "Effect (Δ)", "LL", "UL"),
+    caption   = "Stratum-specific average causal effects by SF-12 scale, pooled across imputations with Rubin's rules"
+  )
+```
+
+## Is the effect modification real?
+To asses this question, we included the Chernozhukov *best linear predictor* (BLP) coefficient $\beta_2$ (on the $Y^{a=1}-Y^{a=0}$ scale; $\beta_2 \neq 0$, which answer whether the between-stratum variation is systematic rather than sampling noise)
+
+```{r cate-heterogeneity}
+#| output: true
+bind_scales(cate_results, \(x) x$blp) |>
+  knitr::kable(
+    digits    = 3,
+    col.names = c("Scale", "Term", "Estimate", "SE", "LL", "UL"),
+    caption = "BLP test for effect modification by SF-12 scale, pooled across imputations (HC3 robust SEs within imputation). beta1_ate is the population-average effect on the conventional $Y^{a=1} - Y^{a=0}$ scale and should sit near the TMLE average causal effect in magnitude. beta2_hte ≠ 0 is evidence that the 12 strata genuinely differ."
+  )
+```
+
+```{r wald-test}
+#| output: false
+#| include: false
+#| eval: true
+
+## The omnibus Wald test of homogeneity $\Delta_1 = \dots = \Delta_{12}$ 
+wald <- bind_scales(cate_results, \(x) x$wald)
+
+stopifnot(
+  "wald test df1 differs across imputations -- stratum count is not stable" =
+    all(dplyr::summarise(wald, k = dplyr::n_distinct(df1), .by = scale)$k == 1)
+)
+
+wald |>
+  summarise(
+    `median F` = median(F),
+    df1        = first(df1),
+    `median p` = median(p),
+    `min p`    = min(p),
+    `max p`    = max(p),
+    .by = scale
+  ) |>
+  knitr::kable(
+    digits  = 3,
+    caption = "Omnibus Wald test of effect homogeneity across strata ($\\Delta_1 = \\dots = \\Delta_{12}$), by SF-12 scale. F statistics are not Rubin-pooled; the median and range across imputations are shown."
+  )
+```
+
+```{r cate-sanity}
+#| output: false
+#| include: false
+#| eval: true
+
+### Marginal mean of the DR score against the sign-flipped TMLE average causal effect (as a diagnostic check).
+
+# The TMLE row is sign-flipped onto the DR score's Y^{a=0} - Y^{a=1} scale, so
+# the two rows within a scale should agree; ll/ul swap places under the flip.
+tmle_ate <- bind_scales(tmle_results) |> filter(type == "ate")
+dr_ate   <- bind_scales(cate_results, \(x) x$ate)
+
+bind_rows(
+  dr_ate |>
+    transmute(scale,
+              quantity = "Pooled mean(ψ) — DR score, $Y^{a=0} - Y^{a=1}$ scale",
+              estimate, ll, ul),
+  tmle_ate |>
+    # The flipped bounds are computed in a separate mutate() on purpose:
+    # transmute() evaluates its arguments in order against a data mask that
+    # updates as it goes, so `ll = -ul, ul = -ll` in one call would read the
+    # already-overwritten `ll` and hand back the original `ul` unchanged.
+    mutate(flip_ll = -ul, flip_ul = -ll) |>
+    transmute(scale,
+              quantity = "−1 × TMLE average causal effect (`tmle_results`)",
+              estimate = -effect, ll = flip_ll, ul = flip_ul)
+) |>
+  arrange(scale) |>
+  knitr::kable(
+    digits  = 3,
+    caption = "Diagnostic check by SF-12 scale: the marginal mean of the DR score against the sign-flipped TMLE average causal effect. The two estimators target the same estimand but share no fitted exposure or outcome models, so close agreement is expected and material disagreement points to a model-specification bug."
+  )
+```
+
+## Caterpillar plot
+
+```{r plot-cate-caterpillar}
+#| output: true
+#| include: true
+#| eval: true
+#| fig-cap: "Stratum-specific average causal effect of financial distress on the SF-12 mental (MCS) and physical (PCS) component summaries (95% CI). The estimates are represented in positive values, thus should be interpreted as points lost to distress. Dashed line represents that scale's marginal TMLE average causal effect."
+#| fig-width: 9
+#| fig-height: 4.5
+
+strata_order <- gate |>
+  filter(scale == "MCS") |>
+  arrange(estimate) |>
+  pull(strata_label)
+strata_order <- unique(c(strata_order, setdiff(gate$strata_label, strata_order)))
+
+ref_ate <- tmle_ate |> transmute(scale, ref = -effect)
+
+cate_caterpillar <- gate |>
+  mutate(strata_label = factor(strata_label, levels = strata_order)) |>
+  ggplot(aes(x = estimate, y = strata_label)) +
+  theme_bw() +
+  geom_vline(xintercept = 0, linetype = "dotted", colour = "grey60") +
+  geom_vline(data = ref_ate, aes(xintercept = ref),
+             linetype = "dashed", colour = "grey30") +
+  geom_pointrange(aes(xmin = ll, xmax = ul), size = 0.4) +
+  labs(x = "SF-12 points lost to financial distress (95% CI)",
+       y = NULL) +
+  facet_wrap(~scale, scales = "fixed") +
+  theme(panel.grid.minor = element_blank())
+
+print(cate_caterpillar)
+
+ggsave(
+  filename = here::here("figs", "cate_caterpillar.png"),
+  plot     = cate_caterpillar,
+  width = 9, height = 4.5, dpi = 300
+)
+```
+
+```{r cate-thinnest}
+#| output: false
+#| include: false
+#| eval: false
+thin <- gate |> dplyr::slice_min(n_j_min, n = 1, with_ties = FALSE)
+
+# Three cautions bound this section. First, congeniality between the imputation model and a between-stratum contrast is improved by the saturated $A \times S$ imputation terms but not exact — the exposure and outcome models used in the analysis are nonparametric in all of $W$. Second, the sparsest stratum (`r thin$scale`, n ≈ `r thin$n_j_min` at ~`r round(thin$pct_exposed)`% exposed) rests on roughly `r round(thin$n_j_min * thin$pct_exposed / 100)` exposed observations; its wide interval and its ĝ diagnostics keep that near-violation of positivity visible. Third, the 12 stratum-specific standard errors ignore the correlation across strata induced by the shared exposure and outcome model fits, as is conventional.
+```
+

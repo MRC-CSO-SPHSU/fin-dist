@@ -1,0 +1,41 @@
+## batchtools SLURM template (consumed by future.batchtools).
+##
+## Per-job resources are passed via future::plan(resources = list(...)) in
+## _targets.R and become the placeholders below. Defaults can be overridden
+## per-target via tar_resources(future = tar_resources_future(resources = list(...))).
+##
+## Recognised resources keys:
+##   ncpus       — int, --cpus-per-task
+##   memory      — int MB, --mem-per-cpu
+##   walltime    — int seconds, --time   (converted to whole minutes)
+##   partition   — string, --partition   (omitted if NULL)
+##   account     — string, --account     (omitted if NULL)
+
+<%
+log.file <- path.expand(log.file)
+-%>
+
+#!/bin/bash
+#SBATCH --job-name=<%= job.name %>
+#SBATCH --output=<%= log.file %>
+#SBATCH --error=<%= log.file %>
+#SBATCH --time=<%= ceiling(resources$walltime / 60) %>
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=<%= resources$ncpus %>
+#SBATCH --mem-per-cpu=<%= resources$memory %>
+<%= if (!is.null(resources$partition)) sprintf("#SBATCH --partition=%s", resources$partition) %>
+<%= if (!is.null(resources$account))   sprintf("#SBATCH --account=%s",   resources$account)   %>
+
+set -uo pipefail
+
+module purge
+module load apps/miniforge
+source "$(conda info --base)/etc/profile.d/conda.sh"
+conda activate quarto
+
+export OMP_NUM_THREADS=1
+export OPENBLAS_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+export RANGER_NUM_THREADS=1
+
+Rscript -e 'batchtools::doJobCollection("<%= uri %>")'

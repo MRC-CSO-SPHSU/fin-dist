@@ -1,0 +1,387 @@
+---
+title: "Testing analysis methods"
+author: "Darwin Del Castillo"
+format: 
+  docx:
+    number-sections: true
+    
+editor: source
+---
+
+# Generating simulated data
+Data generated in Stata using methods in [Methods for dealing with time-dependent confounding](https://onlinelibrary.wiley.com/doi/10.1002/sim.5686).
+
+TMLE methods tested with `ltmle` package. A comprenhensive review of the methods and their implementation in R is available in [Using longitudinal targeted maximum likelihood
+estimation in complex settings with dynamic interventions](doi.org/10.1002/sim.8340) and [Targeted Maximum Likelihood Estimation for Causal Inference in Observational Studies] (doi.org/10.1093/aje/kww165).
+
+```{r simulate}
+#| output: false
+here::i_am("01_simulation.qmd")
+
+if (!requireNamespace("RStata", quietly = TRUE)) {
+  message("RStata not installed, installing RStata package...")
+  install.packages("RStata")
+}
+pacman::p_load(RStata)
+stata_path <- "/Applications/Stata/StataMP.app/Contents/MacOS/stata-mp"
+options("RStata.StataPath" = stata_path)
+options("RStata.StataVersion" = 18.5)
+
+stata(here::here("code","simulated_data","sim_data.do"))
+```
+
+```{r read_simulated}
+#| output: false
+
+df1 <- haven::read_dta(here::here("data","sim_data","sim1.dta"))
+df2 <- haven::read_dta(here::here("data","sim_data","sim2.dta"))
+df3 <- haven::read_dta(here::here("data","sim_data","sim3.dta"))
+```
+
+# Causal DAG
+The DAG for the simulated data DF1 is as follows:
+```{r dag1}
+#| output: false
+#| include: true
+#| fig-cap: "DAG for simulated data with single time point treatment"
+#| fig-width: 8
+#| fig-height: 6
+
+DiagrammeR::grViz("
+                  digraph{
+                  graph[rankdir=LR]
+
+                  node[fontname=Arial]
+                  L1 [label=<<B><I>L1</I></B>>]
+                  A0 [label=<<B><I>A0</I></B>>]
+                  A1 [label=<<B><I>A1</I></B>>]
+                  Y  [label=<<B><I>Y</I></B>>]
+                  U0 [label=<<B><I>U0</I></B>>,fontcolor=deepskyblue4,style=dashed,color=deepskyblue4]
+
+                  A0->L1->A1->Y
+                  A0->Y
+                  A0->A1
+                  U0->A0 [style=dashed, color=deepskyblue4]
+                  U0->L1 [style=dashed, color=deepskyblue4]
+
+                  {rank=same; A0}
+                  {rank=same; L1; A1}
+                  {rank=max; Y}
+                  {rank=min; U0}
+                  }
+                  "
+)
+```
+
+
+The DAG for the simulated data DF3 is as follows:
+```{r dag}
+#| output: false
+#| include: true
+#| fig-cap: "DAG for simulated data"
+#| fig-width: 8
+#| fig-height: 6
+
+DiagrammeR::grViz("
+                  digraph{
+                  graph[rankdir=LR]
+
+                  node[fontname=Arial]
+                  L0 [label=<<B><I>L<SUB>0</SUB></I></B>>]
+                  L1 [label=<<B><I>L<SUB>1</SUB></I></B>>]
+                  L2 [label=<<B><I>L<SUB>2</SUB></I></B>>]
+                  L3 [label=<<B><I>L<SUB>3</SUB></I></B>>]
+                  A0 [label=<<B><I>A<SUB>0</SUB></I></B>>]
+                  A1 [label=<<B><I>A<SUB>1</SUB></I></B>>]
+                  A2 [label=<<B><I>A<SUB>2</SUB></I></B>>]
+                  A3 [label=<<B><I>A<SUB>3</SUB></I></B>>]
+                  Y  [label=<<B><I>Y</I></B>>]
+
+                  L0->L1->L2->L3
+                  A0->A1->A2->A3
+
+                  L0->A0
+                  L1->A1
+                  L2->A2
+                  L3->A3
+
+                  A0->L1
+                  A1->L2
+                  A2->L3
+
+                  L0->Y
+                  L1->Y
+                  L2->Y
+                  L3->Y
+                  A0->Y
+                  A1->Y
+                  A2->Y
+                  A3->Y
+
+                  {rank=same; L0; A0}
+                  {rank=same; L1; A1}
+                  {rank=same; L2; A2}
+                  {rank=same; L3; A3}
+                  {rank=max; Y}
+                  }
+                  "
+                  )
+```
+
+```{r prep_analysis}
+#| output: false
+
+# Loading helpers
+source(here::here("fnct", "testing_helpers.R"))
+
+# Loading packages
+pacman::p_load(tidyverse,
+               gfoRmula,
+               gFormulaMI)
+
+# Reshaping data
+names(df1) # single-time point treatment, binary A
+names(df2) # single-time point continuous treatment, continuous A
+names(df3) # time-varying confounder and treatment
+
+dt3 <- df3 |> 
+  rename(y3 = y) |>
+  mutate(id = row_number()) |> 
+  select(-u) |> 
+  pivot_longer(l0:y3, names_to = c("var", "t0"), values_to = "val", names_pattern = "(.)(.)") |>
+  pivot_wider(names_from = var, values_from = val) |> 
+  mutate(t0 = as.integer(t0)) |> 
+  data.table::as.data.table()
+```
+
+# Potential outcomes for all treatment combinations
+The potential outcomes for all treatment combinations are as follows, according to the paper:
+
+
+|  a0 |  a1 |  a2 |  a3 | True mean w/PO |
+|----:|----:|----:|----:|---------------:|
+|   0 |   0 |   0 |   0 |            2.1 |
+|   0 |   0 |   0 |   1 |            1.6 |
+|   0 |   0 |   1 |   0 |            1.6 |
+|   0 |   0 |   1 |   1 |            1.1 |
+|   0 |   1 |   0 |   0 |            1.6 |
+|   0 |   1 |   0 |   1 |            1.1 |
+|   0 |   1 |   1 |   0 |            1.1 |
+|   0 |   1 |   1 |   1 |            0.6 |
+|   1 |   0 |   0 |   0 |            1.6 |
+|   1 |   0 |   0 |   1 |            1.1 |
+|   1 |   0 |   1 |   0 |            1.1 |
+|   1 |   0 |   1 |   1 |            0.6 |
+|   1 |   1 |   0 |   0 |            1.1 |
+|   1 |   1 |   0 |   1 |            0.6 |
+|   1 |   1 |   1 |   0 |            0.6 |
+|   1 |   1 |   1 |   1 |            0.1 |
+
+# Testing with `gfoRmula`
+Testing trajectories for binary treatment with time-varying confounder using `gfoRmula` on `df3`.
+```{r gformula-test}
+time_points <- 4
+# static <- 1L  # gfoRmula intervention-type code for "static"
+
+# Complex interventions
+intvars <-  as.list(rep("a", 16))
+
+interventions <- tibble(a = 0:1, b = 0:1, c = 0:1, d = 0:1) |>
+  expand.grid() |>
+  arrange(a, b, c, d) |>
+  t() |>
+  as_tibble() |>
+  unclass() |>
+  map(~list(c(static, .x)))
+
+int_description <-
+  map(interventions, ~paste(.x[[1]][2:5], collapse = "-") |> paste0("Exposed: ", x = _))
+
+
+gf_out <- gformula(
+  dt3,
+  outcome_type = "continuous_eof", # eofu
+  id = "id", # i(i)
+  outcome_name = "y", # out(y)
+  covnames = c("l", "a"), # com(y:regress, l:logit, a:logit)
+  covtypes = c("binary", "binary"),  # see above
+  covparams = list(
+    covmodels = c(
+      l ~ lag1_a*lag1_l,
+      a ~ l*lag1_a
+    )
+  ),
+  time_name = "t0", #t(t)
+  time_points = time_points,
+  intvars = intvars,
+  interventions = interventions,
+  int_descript = int_description,
+  histories = c(lagged),
+  histvars = list(c("a", "l")),
+  ymodel = y ~ a + l + lag1_a + lag2_a + lag3_a + lag1_l + lag2_l + lag3_l ,
+  seed = 1234,
+  # parallel = TRUE,
+  # nsamples = 100, # Number of bootstrap samples 
+  nsimul = 2000
+  # ncores = 6
+)
+
+gf_out$result |> 
+  filter(Interv. != 0) |> 
+  transmute(Intervention = int_description, Estimate = round(`g-form mean`, 3)) |> 
+  knitr::kable()
+```
+
+# Testing with `IPTW- MSM`
+## Case 1: Single time point treatment, binary treatment
+```{r msm-iptw-test-single-point}
+# Step 1: marginal treatment probability
+mod_a0 <- lm(a0 ~ 1, data = df1)
+p0 <- ifelse(df1$a0 == 1, fitted(mod_a0), 1 - fitted(mod_a0))
+
+# Step 2: P(A1 = observed | A0, L) — conditional on prior treatment and confounder
+mod_a1 <- lm(a1 ~ a0 * l, data = df1)
+p1 <- ifelse(df1$a1 == 1, fitted(mod_a1), 1 - fitted(mod_a1))
+
+# Step 3: Unstabilized IPTW weights
+w <- 1 / (p0 * p1)
+
+# Step 3.1: Stabilized IPTW weights
+# Numerator: P(A1 = observed | A0 only)
+mod_a1_num <- lm(a1 ~ a0, data = df1)
+p1_num <- ifelse(df1$a1 == 1, fitted(mod_a1_num), 1 - fitted(mod_a1_num))
+
+w_s <- (p0 * p1_num) / (p0 * p1)
+
+# Step 4: MSM outcome model
+msm_fit <- lm(y ~ a0 * a1, data = df1, weights = w)
+
+msm_fit_s <- lm(y ~ a0 * a1, data = df1, weights = w_s)
+
+summary(msm_fit)
+summary(msm_fit_s)
+```
+
+## Case 2: Single time point treatment, continuous treatment
+```{r msm-iptw-test-continuous-l}
+# Denominator: f(A1 | A0, L) — conditional density
+mod_a1_d <- lm(a1 ~ a0 * l, data = df2)
+sigma_d   <- sigma(mod_a1_d)
+f_denom   <- dnorm((df2$a1 - fitted(mod_a1_d)) / sigma_d)
+
+# Numerator: f(A1 | A0) — no L (stabilized)
+mod_a1_n <- lm(a1 ~ a0, data = df2)
+sigma_n   <- sigma(mod_a1_n)
+f_num     <- dnorm((df2$a1 - fitted(mod_a1_n)) / sigma_n)
+
+# Stabilized weights
+w_s <- f_num / f_denom
+
+# MSM outcome model
+msm_fit_cont   <- lm(y ~ a0 * a1, data = df2, weights = w_s)
+summary(msm_fit_cont)
+```
+
+## Case 3: Time-varying treatment and confounder
+Testing trajectories for binary treatment with time-varying confounder using MSM with IPTW
+```{r msm-iptw-test-time-varying}
+# --- Denominator models: P(At = obs | past treatment, current L) ---
+d0 <- glm(a0 ~ l0,      family = binomial, data = df3)
+d1 <- glm(a1 ~ a0 * l1, family = binomial, data = df3)
+d2 <- glm(a2 ~ a1 * l2, family = binomial, data = df3)
+d3 <- glm(a3 ~ a2 * l3, family = binomial, data = df3)
+
+pd0 <- ifelse(df3$a0 == 1, fitted(d0), 1 - fitted(d0))
+pd1 <- ifelse(df3$a1 == 1, fitted(d1), 1 - fitted(d1))
+pd2 <- ifelse(df3$a2 == 1, fitted(d2), 1 - fitted(d2))
+pd3 <- ifelse(df3$a3 == 1, fitted(d3), 1 - fitted(d3))
+
+# --- Numerator models: P(At = obs | past treatment only) ---
+n0 <- glm(a0 ~ 1,  family = binomial, data = df3)
+n1 <- glm(a1 ~ a0, family = binomial, data = df3)
+n2 <- glm(a2 ~ a1, family = binomial, data = df3)
+n3 <- glm(a3 ~ a2, family = binomial, data = df3)
+
+pn0 <- ifelse(df3$a0 == 1, fitted(n0), 1 - fitted(n0))
+pn1 <- ifelse(df3$a1 == 1, fitted(n1), 1 - fitted(n1))
+pn2 <- ifelse(df3$a2 == 1, fitted(n2), 1 - fitted(n2))
+pn3 <- ifelse(df3$a3 == 1, fitted(n3), 1 - fitted(n3))
+
+# --- Unstabilized and stabilized weights ---
+w   <- 1 / (pd0 * pd1 * pd2 * pd3)
+w_s <- (pn0 * pn1 * pn2 * pn3) / (pd0 * pd1 * pd2 * pd3)
+
+summary(w_s)  # mean ≈ 1; flag if max >> 20
+summary(w)    # mean >> 1; flag if max >> 20
+
+# --- MSM outcome model ---
+
+msm_tv <- lm(y ~ a0 + a1 + a2 + a3, data = df3, weights = w_s)
+summary(msm_tv)
+```
+
+```{r tmle-test}
+pacman::p_load(ltmle, SuperLearner, xgboost)
+
+# Two reasons SL.xgboost fails inside ltmle:
+# 1. Binary A/L nodes are passed as R factors (encoded 1/2, not 0/1).
+# 2. The Q-model for continuous bounded Y uses family=binomial (TMLE targeting
+#    step), so xgboost receives non-0/1 labels with binary:logistic objective.
+# Both cases: drop to gaussian so xgboost uses reg:squarederror.
+SL.xgboost.ltmle <- function(Y, X, newX, family, ...) {
+  if (is.factor(Y)) Y <- as.integer(Y) - 1L
+  if (!all(Y %in% c(0, 1))) family <- gaussian()
+  SL.xgboost(Y = Y, X = X, newX = newX, family = family, ...)
+}
+
+# ltmle requires Y in [0,1] — scale and back-transform after
+y_range   <- range(df3$y)
+df3_ltmle <- df3 |>
+  select(l0, a0, l1, a1, l2, a2, l3, a3, y) |>
+  mutate(y = (y - y_range[1]) / diff(y_range))
+
+# --- ATE: always treated vs never treated ---
+ltmle_ate <- ltmle(
+  data          = df3_ltmle,
+  Anodes        = c("a0", "a1", "a2", "a3"),
+  Lnodes        = c("l0", "l1", "l2", "l3"),
+  Ynodes        = "y",
+  abar          = list(treat = rep(1, 4), control = rep(0, 4)),
+  SL.library    = "glm",
+  estimate.time = FALSE
+)
+summary(ltmle_ate)
+
+# --- All 16 regimes (matches g-formula table) ---
+regimes       <- expand.grid(a0 = 0:1, a1 = 0:1, a2 = 0:1, a3 = 0:1) |> arrange(a0, a1, a2, a3)
+regime_labels <- apply(regimes, 1, paste, collapse = "-")
+regime_list   <- split(regimes, seq_len(nrow(regimes)))
+
+# Helper: run ltmle for all 16 regimes with a given SL library
+run_ltmle <- function(sl_lib) {
+  map(regime_list, ~ltmle(
+    data          = df3_ltmle,
+    Anodes        = c("a0", "a1", "a2", "a3"),
+    Lnodes        = c("l0", "l1", "l2", "l3"),
+    Ynodes        = "y",
+    abar          = as.numeric(.x),
+    SL.library    = sl_lib,
+    estimate.time = FALSE
+  ))
+}
+
+ltmle_glm <- run_ltmle("SL.glm")
+ltmle_xgb <- run_ltmle(c("SL.glm", "SL.xgboost.ltmle"))
+
+# Extract back-transformed estimates for a list of ltmle results
+extract_est <- function(results) {
+  map_dbl(results, ~summary(.x)$treatment$estimate * diff(y_range) + y_range[1])
+}
+
+tibble(
+  Regime  = regime_labels,
+  GLM     = extract_est(ltmle_glm),
+  XGBoost = extract_est(ltmle_xgb)
+  ) |>
+  knitr::kable(digits = 3)
+```

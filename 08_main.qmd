@@ -1,0 +1,11 @@
+---
+title: "Main report"
+subtitle: "Wave 8 as index case with waves 3 and 13 as secondary cases"
+author: "Darwin Del Castillo"
+format:
+  html:
+    number-sections: true
+
+editor: source
+---
+

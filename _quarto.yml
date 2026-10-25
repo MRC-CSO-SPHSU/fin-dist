@@ -1,0 +1,24 @@
+project:
+  output-dir: report/html
+
+toc: true
+number-sections: true
+prefer-html: true
+
+format:
+  html:
+#    css: styles.css
+    html-math-method: mathjax
+    code-fold: true
+    code-summary: "Show code"
+  pdf:
+    pdf-engine: xelatex
+    documentclass: report
+    toc: false
+    margin-left: 30mm
+    margin-right: 30mm
+  docx:
+    reference-doc: template.docx
+    number-sections: true
+    margin-left: 3cm
+    margin-right: 3cm

@@ -1,0 +1,583 @@
+---
+title: "Simple model testing: two waves of data"
+author: "Darwin Del Castillo"
+format: 
+  docx:
+    number-sections: true
+    
+editor: source
+---
+
+# Data
+Data comes from the UK Household Longitudinal Study (UKHLS), also known as Understanding Society. We use data from waves 9 and 10, which were collected in 2017-2019 and 2018-2020, respectively. The sample is restricted to individuals with complete data on the outcome and covariates at both time points.
+
+```{r setup}
+#| output: false
+here::i_am("02_simple_model.qmd")
+
+pacman::p_load(gfoRmula,
+               gFormulaMI,
+               DiagrammeR,
+               tidyverse,
+               magrittr,
+               colorBlindness,
+               ltmle,
+               SuperLearner)
+
+source(here::here("fnct", "import_cleaning.R"))
+source(here::here("fnct", "helpers.R"))
+```
+
+
+```{r data-setup}
+#| output: false
+pop_data <- import_data(force = FALSE) |> clean_data() |> preproc_data()
+
+# All observations with complete data across waves 9 and 10
+int_data <-
+  pop_data[wave %in% 9:10][, t0 := t0 - 8]
+
+# Select variables of interest
+final_data <- int_data[, .(pidp, wave, t0, sf12mcs_dv, sf12pcs_dv, sex_dv_base, econ_dist_bin)]
+
+missings <-
+  final_data[is.na(sf12mcs_dv) |
+             is.na(sf12pcs_dv) | is.na(sex_dv_base) |
+             is.na(econ_dist_bin), .(pidp)]
+
+final_data <- final_data[!missings, on = .(pidp)]
+
+intervention_pattern_2 <- expand_grid(0:1, 0:1) |>
+  t() |>
+  as_tibble(.name_repair = "minimal") |>
+  unclass()
+```
+
+# Model specification
+We specify a simple model with two time points (waves 9 and 10). The exposure is financial distress at waves 9 and 10 (with wave 8 as a lagged covariate). The outcome is the MCS score at wave 10, and the exposure is employment status (econ_emp_bin) at waves 9 and 10. We also include the following covariates: \
+ - **Time-invariant:** sex \
+ - **Time-varying:** PCS score at waves 8 and 9, as well as PCS at wave 8 as lagged covariate. \
+The DAG for this model is as follows: \
+
+```{r dag-model-spec}
+#| echo: false
+#| include: true
+#| fig-width: 8
+#| fig-height: 6
+
+DiagrammeR::grViz("
+                  digraph{
+                  graph[rankdir=TB]
+
+                  node[fontname=Arial]
+                  TI1 [label=<<B><I>Sex</I></B>>]
+                  C1 [label=<<B><I>PCS<SUB>8</SUB></I></B>>]
+                  C2 [label=<<B><I>PCS<SUB>9</SUB></I></B>>]
+                  E1 [label=<<B><I>FD<SUB>9</SUB></I></B>>, 
+                      fontcolor=deepskyblue4, 
+                      color=deepskyblue4]
+                  E2 [label=<<B><I>FD<SUB>10</SUB></I></B>>, 
+                      fontcolor=deepskyblue4, 
+                      color=deepskyblue4]
+                  Y1 [label=<<B><I>MCS<SUB>9</SUB></I></B>>, 
+                      fontcolor=darkorange2, 
+                      color=darkorange2]
+                  Y2 [label=<<B><I>MCS<SUB>10</SUB></I></B>>, 
+                      fontcolor=darkorange2, 
+                      color=darkorange2]
+
+                  E1 -> E2
+                  Y1 -> Y2
+                  C1 -> C2
+
+                  TI1 -> E1, E2, C1, C2, Y1, Y2 
+
+                  C2 -> E2
+                  C2 -> Y2
+
+                  E1 -> C2
+
+                  C1 -> E1
+                  C1 -> Y1
+
+                  E1 -> Y1 
+                  E2 -> Y2
+
+                  {rank=min; TI1}
+                  {rank=same; C1, C2}
+                  {rank=same; E1, E2}
+                  {rank=max; Y1, Y2}
+
+                  }
+                  "
+)
+```
+
+# First model: `gformula` with two time points
+Interventions of interest are financial distress (FD). We will compare the following interventions: \
+- **Intervention 1:** No financial distress at either time point (`econ_dist_bin` = 0-0) \
+- **Intervention 2:** Early financial distress (`econ_dist_bin` = 1-0) \
+- **Intervention 3:** Late financial distress (`econ_dist_bin` = 0-1) \
+- **Intervention 4:** Sustained financial distress (`econ_dist_bin` = 1-1) \
+
+```{r gformula-pip}
+outcome_type <- "continuous_eof"
+outcome_name <- "sf12mcs_dv"
+intvar <- c("econ_dist")
+
+covnames <- c("econ_dist_bin", "sf12pcs_dv")
+basecovs <- c("sex_dv_base")
+covtypes <- c("binary", # econ_dist_bin
+              "normal")  # sf12pcs_dv
+
+ymodel <- sf12mcs_dv ~ sex_dv_base + # Baseline covariates: sex
+    sf12pcs_dv + lag1_sf12pcs_dv + # Time-varying covariates: PCS at waves 8 and 9
+    econ_dist_bin + lag1_econ_dist_bin # Exposure: financial distress at waves 9 and 10
+
+covparams <- list(
+    covmodels = c(
+        econ_dist_bin ~ sex_dv_base +
+            lag1_sf12pcs_dv +
+            sf12pcs_dv +
+            lag1_econ_dist_bin,
+        sf12pcs_dv ~ sex_dv_base +
+            lag1_sf12pcs_dv +
+            lag1_econ_dist_bin
+    )
+)
+
+laggedvars <- c("sf12pcs_dv",
+                "econ_dist_bin")
+
+histories <- c(lagged)
+histvars <- list(laggedvars)
+
+nsim <- 2000 # Monte Carlo sample size
+ncores <- min(32, parallel::detectCores() - 2)
+
+interventions <- list(
+  list(c(static, 0, 0)),  # never distressed
+  list(c(static, 1, 0)),  # distressed at t1 only
+  list(c(static, 0, 1)),  # distressed at t2 only
+  list(c(static, 1, 1))   # always distressed
+)
+
+intvars <- as.list(rep("econ_dist_bin", length(interventions)))
+
+int_description <- purrr::map(interventions, ~paste(.x[[1]][-1], collapse = "-") |>
+                         paste0("econ_dist_bin:", x = _))
+
+time_points <- 2
+
+gform_cont_eof <- gformula(
+    obs_data = final_data,
+    outcome_type = outcome_type,                       
+    id = "pidp",
+    time_name = "t0",
+    time_points = time_points,
+    covnames = covnames,
+    outcome_name = outcome_name,
+    covtypes = covtypes,
+    covparams = covparams,
+    # covpredict_custom = covpredict_custom,
+    ymodel = ymodel,
+                           
+    intvars = intvars,
+    interventions = interventions,
+    int_descript = int_description,
+                           
+    histories = histories,
+    histvars = histvars,
+    basecovs = basecovs,
+    seed = 1234,
+    parallel = TRUE,
+    ncores = ncores,
+    nsamples = nsim, # Number of bootstrap samples
+    # nsim = NA # Defaults to number of obs in dataset
+    ref_int = 0, # Natural trajectories
+    show_progress = FALSE # Can be TRUE when parallel = FALSE
+)
+```
+
+```{r gformula-results}
+interventions <- intervention_pattern_2 |> 
+  purrr::map_chr(~paste(.x, collapse = "-")) |> 
+  paste0("econ_dist_bin:", x = _)
+
+gform_results <- gform_cont_eof$result |> 
+  filter(`Interv.` != 0) |>
+  select(gform_effect = `g-form mean`, gform_se = `Mean SE`, gform_ll = `Mean lower 95% CI`, gform_ul = `Mean upper 95% CI`) |> 
+  mutate(intervention = c(intervention_pattern_2 |> purrr::map_chr(~paste(.x, collapse = "-"))))
+```
+
+# Second model: `gFormulaMI` with two time points
+The same model is specified using the `gFormulaMI` package, which allows for multiple imputation of missing data. We will use the same interventions and covariates as in the first model.
+
+:::{.callout-note title = "Differences with `gformula` data setup"}
+The `gFormulaMI` package expects data in wide format. Also, `gFormulaMI` does not internally pick lagged variables, so we need to manually create them.
+:::
+
+```{r gformula-mi-data}
+#| output: false
+
+# Selecting waves 8 (lagged) and 9-10 (scope)
+int_data_wide <- pop_data[wave %in% 8:10][, t0 := t0 - 8][
+    , pcs_lagged := shift(sf12pcs_dv, type = "lag"), by = pidp
+  ][wave %in% 9:10]
+
+# Complete-case dataset
+missings <-
+  int_data_wide[is.na(sf12mcs_dv) |
+             is.na(pcs_lagged) | is.na(sex_dv_base) |
+             is.na(econ_dist_bin), .(pidp)]
+
+final_data_wide <- int_data_wide[!missings, on = .(pidp)]
+```
+
+```{r gformula-mi-reshape}
+#| output: false
+
+# Using helpers to reshape data to wide format
+
+wide_data <- final_data_wide |>
+  mutate(econ_dist_bin = as.factor(econ_dist_bin)) |>
+  make_wide(
+    pidp,
+    t0,
+    base_cols = c(sex_dv_base),
+    outcome = sf12mcs_dv,
+    pcs_lagged,
+    econ_dist_bin,
+    waves = c(0, 1)
+  )
+```
+
+```{r gformula-mi}
+#| output: false
+
+regimes <- dplyr::tibble(a = 0:1, b = 0:1) |>
+  expand.grid() |>
+  arrange(a, b) |>
+  t() |>
+  dplyr::as_tibble() |>
+  unclass() |> unname()
+
+predictor_matrix <- make_predictor_matrix(wide_data)
+
+# Fixing predictor matrix
+## pcs_lagged_0 predicts pcs_lagged_1
+predictor_matrix["pcs_lagged_1", "pcs_lagged_0"] <- 1
+
+## econ_dist_bin_0 predicts econ_dist_bin_1
+predictor_matrix["econ_dist_bin_1", "econ_dist_bin_0"] <- 1
+
+method_list <- mice::make.method(wide_data)
+method_list[c("sex_dv_base", "pcs_lagged_0", "econ_dist_bin_0", 
+              "sf12mcs_dv_0", "pcs_lagged_1", "econ_dist_bin_1", 
+              "sf12mcs_dv_1")] <- 
+                c("logreg", "norm", "logreg", 
+                  "norm", "norm", "logreg", 
+                  "norm")
+
+imps <- gFormulaImpute(
+  data = wide_data,
+  M = 20,
+  trtVars = c("econ_dist_bin_0", "econ_dist_bin_1"),
+  trtRegimes = regimes,
+  predictorMatrix = predictor_matrix,
+  method = method_list,
+  silent = TRUE
+)
+
+fits <- imps %$%
+  lm(sf12mcs_dv_1 ~ factor(regime) + 0)
+
+outvals <- syntheticPool(fits)
+
+regimes_2 <- tibble(intervention = regimes |> 
+  map(paste, collapse = "-") |> 
+  reduce(c)
+)
+
+mi_results <- outvals |>
+  as_tibble() |>
+  rownames_to_column("Intervention") |>
+  transmute(mi_effect = Estimate,
+            mi_se = sqrt(Total),
+            mi_ll = `95% CI L`,
+            mi_ul = `95% CI U`) |>
+  bind_cols(regimes_2)
+```
+
+# Third model: IPTW with two time points
+We will use inverse probability of treatment weighting (**IPTW**) to estimate the effect of financial distress on MCS score at wave 10. If both the treatment and the outcome models show similar results, this would suggest that the results are robust to model specification.
+
+```{r data-iptw}
+#| output: false
+
+# Denominator models for IPTW
+## P(econ_dist_bin | sex, pcs_lagged, econ_dist_bin)
+d0 <- glm(econ_dist_bin_0 ~ sex_dv_base * pcs_lagged_0, data = wide_data, family = binomial())
+d1 <- glm(econ_dist_bin_1 ~ sex_dv_base * pcs_lagged_1 * econ_dist_bin_0, data = wide_data, family = binomial())
+
+# Predicted probabilities
+pd0 <- ifelse(wide_data$econ_dist_bin_0 == 1, fitted(d0), 1 - fitted(d0))
+pd1 <- ifelse(wide_data$econ_dist_bin_1 == 1, fitted(d1), 1 - fitted(d1))
+
+# Numerators for IPTW
+## P(econ_dist_bin | intervention)
+n0 <- glm(econ_dist_bin_0 ~ 1, data = wide_data, family = binomial())
+n1 <- glm(econ_dist_bin_1 ~ econ_dist_bin_0, data = wide_data, family = binomial())
+
+pn0 <- ifelse(wide_data$econ_dist_bin_0 == 1, fitted(n0), 1 - fitted(n0))
+pn1 <- ifelse(wide_data$econ_dist_bin_1 == 1, fitted(n1), 1 - fitted(n1))
+
+# Unstabilized weights
+w   <- 1 / (pd0 * pd1)
+
+# Stabilized weights
+sw <- (pn0 * pn1) / (pd0 * pd1)
+
+# love plot to check balance after weighting
+if (!requireNamespace("cobalt", quietly = TRUE)) {
+  install.packages("cobalt")
+  library(cobalt)
+}
+```
+
+## Love plots for balance after weighting
+```{r balance-iptw}
+#| output: true
+#| echo: false
+#| include: true
+
+## unstabilized weights
+w_plot <- cobalt::bal.tab(
+  list(
+    econ_dist_bin_0 ~ sex_dv_base + pcs_lagged_0,
+    econ_dist_bin_1 ~ sex_dv_base + pcs_lagged_1 + econ_dist_bin_0
+  ),
+  data = wide_data,
+  weights = w
+) |>
+  cobalt::love.plot(thresholds = c(m = 0.1), stars = "raw") +
+  theme_bw() +
+  theme(panel.grid.minor = element_blank())
+
+## stabilized weights
+sw_plot <- cobalt::bal.tab(
+  list(
+    econ_dist_bin_0 ~ sex_dv_base + pcs_lagged_0,
+    econ_dist_bin_1 ~ sex_dv_base + pcs_lagged_1 + econ_dist_bin_0
+  ),
+  data = wide_data,
+  weights = sw
+) |>
+  cobalt::love.plot(thresholds = c(m = 0.1), stars = "raw") +
+  theme_bw()+
+  theme(panel.grid.minor = element_blank())
+
+cowplot::plot_grid(
+  sw_plot, # stabilized weights plot
+  w_plot, # unstabilized weights plot
+  labels = c("Stabilized", "Unstabilized"),
+  label_x = 1, hjust = 1.1,
+  nrow = 2
+)
+```
+
+```{r iptw-model}
+#| output: false
+# Outcome model weighted by IPTW
+iptw_model <- lm(sf12mcs_dv_1 ~ econ_dist_bin_0 + econ_dist_bin_1, data = wide_data, weights = w)
+
+iptw_model_sw <- lm(sf12mcs_dv_1 ~ econ_dist_bin_0 + econ_dist_bin_1, data = wide_data, weights = sw)
+
+# Summary of IPTW model
+summary(iptw_model)
+summary(iptw_model_sw)
+```
+
+```{r iptw-results}
+#| output: false
+
+# Results according to each modeled strategy
+
+# All four treatment strategies, plugged into the fitted MSM.
+# Factor levels must match wide_data exactly (lm() stores them in
+# iptw_model$xlevels and predict() rejects any new ones).
+a_levels <- levels(wide_data$econ_dist_bin_0)
+strategies <- expand_grid(
+  econ_dist_bin_0 = factor(a_levels, levels = a_levels),
+  econ_dist_bin_1 = factor(a_levels, levels = a_levels)
+)
+
+extract_iptw <- function(model, prefix) {
+  pred <- predict(model, newdata = strategies, se.fit = TRUE)
+  strategies |>
+    transmute(
+      intervention = paste(as.integer(econ_dist_bin_0) - 1L,
+                           as.integer(econ_dist_bin_1) - 1L, sep = "-"),
+      "{prefix}_effect" := round(pred$fit, 3),
+      "{prefix}_se"     := round(pred$se.fit, 3),
+      "{prefix}_ll"     := round(pred$fit - 1.96 * pred$se.fit, 3),
+      "{prefix}_ul"     := round(pred$fit + 1.96 * pred$se.fit, 3)
+    )
+}
+
+iptw_results <- extract_iptw(iptw_model, "iptw_u") |>
+  left_join(extract_iptw(iptw_model_sw, "iptw_sw"), by = "intervention") |>
+  select("intervention", starts_with("iptw_sw"))
+```
+
+# Fourth model: LTMLE with two time points
+We will use **LTMLE** with two time points to estimate the effect of financial distress on MCS score at wave 10.
+This model will provide a doubly robust estimate of the effect of financial distress on MCS score at wave 10, which is consistent if either the treatment model or the outcome model is correctly specified.
+
+```{r ltmle data}
+#| output: false
+
+# ltmle requires wide data with columns in temporal order:
+#   W (baseline) -> L_t -> A_t -> Y_t for each t.
+# We rescale MCS to [0,1] (Yrange will be c(0,1)); ltmle rescales internally
+# for the logistic fluctuation step.
+
+sl_libs <- c("SL.glm")
+MCS_RANGE <- c(0, 1)
+
+# Dedicated frame for ltmle:
+#   - rescale Y to [0,1] (don't mutate the shared wide_data)
+#   - coerce treatment factor (set for gFormulaImpute) back to 0/1 integer
+#   - drop sf12mcs_dv_0 (MCS at wave 9): intermediate outcome, not in this spec
+#   - keep columns in W -> A_0 -> L_1 -> A_1 -> Y order
+ltmle_data <- wide_data |>
+  mutate(
+    econ_dist_bin_0 = as.integer(as.character(econ_dist_bin_0)),
+    econ_dist_bin_1 = as.integer(as.character(econ_dist_bin_1)),
+    sf12mcs_dv_1    = sf12mcs_dv_1 / 100
+  ) |>
+  select(sex_dv_base,
+         pcs_lagged_0,     # W:   PCS at wave 8 (baseline)
+         econ_dist_bin_0,  # A_0: FD at wave 9
+         sf12mcs_dv_0,    # Y_0: MCS at wave 9 (between A_0 and A_1)
+         pcs_lagged_1,     # L_1: PCS at wave 9 (between A_0 and A_1)
+         econ_dist_bin_1,  # A_1: FD at wave 10
+         sf12mcs_dv_1)     # Y_1: MCS at wave 10
+
+# ltmle's abar accepts a single regime (vector or n x numAnodes matrix for
+# dynamic regimes) OR a list of two regimes (for ATE/RR/OR contrasts).
+# It does NOT support >2 static regimes in one call, so we re-fit per regime.
+# With sl_libs = SL.glm the 4x compute cost is small.
+regimes <- list(
+  "0-0" = c(0, 0),
+  "0-1" = c(0, 1),
+  "1-0" = c(1, 0),
+  "1-1" = c(1, 1)
+)
+
+fit_one_regime <- function(a) {
+  ltmle(
+    data = ltmle_data,
+    Anodes = c("econ_dist_bin_0", "econ_dist_bin_1"),
+    Lnodes = c("pcs_lagged_0", "pcs_lagged_1"),
+    Ynodes = c("sf12mcs_dv_0", "sf12mcs_dv_1"),
+    survivalOutcome = FALSE,
+    abar = a,
+    SL.library = sl_libs,
+    estimate.time = FALSE,
+    variance.method = "ic",
+    Yrange = MCS_RANGE
+  )
+}
+
+ltmle_fits <- purrr::map(regimes, fit_one_regime)
+
+# For a single-regime ltmle object, summary() exposes the point estimate,
+# SE and CI directly under $treatment (no $effect.measures wrapper -- that
+# is only present for the 2-regime ltmleEffectMeasures shape).
+ltmle_results <- purrr::imap_dfr(ltmle_fits, function(fit, label) {
+  tr <- summary(fit, estimator = "tmle")$treatment
+  tibble::tibble(
+    intervention = label,
+    ltmle_effect = tr$estimate,
+    ltmle_se     = tr$std.dev,
+    ltmle_ll     = tr$CI[1],
+    ltmle_ul     = tr$CI[2]
+  )
+}) |>
+  # Y was divided by 100 in data prep; rescale back to 0-100 for comparison.
+  dplyr::mutate(dplyr::across(
+    c(ltmle_effect, ltmle_se, ltmle_ll, ltmle_ul),
+    ~ round(.x * 100, 3)
+  ))
+```
+
+# Comparing results between all models
+```{r compare-results}
+#| output: true
+#| echo: false
+#| include: true
+
+comparison <- gform_results |>
+  filter(intervention %in% c("0-0", "0-1", "1-0", "1-1")) |>
+  left_join(mi_results, by = c("intervention" = "intervention")) |>
+  left_join(iptw_results, by = c("intervention" = "intervention")) |>
+  left_join(ltmle_results, by = c("intervention" = "intervention")) |>
+  relocate(intervention)
+
+tab_models <- comparison |>
+  knitr::kable(digits = 3)
+
+print(tab_models)
+```
+
+# Graphical comparison
+```{r plot-results}
+#| output: true
+#| echo: false
+#| include: true
+
+
+# One panel per method (faceted vertically); within each panel, the four
+# interventions are shown as coloured points + 95% CI. Shape is dropped
+# because facet already distinguishes methods.
+comparison |>
+  pivot_longer(
+    -intervention,
+    names_to = c("method", ".value"),
+    names_pattern = "(.*)_(.*)"
+  ) |>
+  mutate(
+    method = factor(method,
+                    levels = c("gform", "mi", "iptw_sw", "ltmle"),
+                    labels = c("G-formula", "G-Formula MI", "IPTW", "LTMLE")),
+    intervention = factor(intervention,
+                          levels = c("0-0", "1-0", "0-1", "1-1"),
+                          labels = c("Never FD", "Early FD", "Late FD", "Always FD"))
+  ) |>
+  ggplot(aes(x = effect, y = intervention,
+             colour = intervention,
+             xmin = ll, xmax = ul)) +
+  theme_bw() +
+  geom_point(size = 2.5) +
+  geom_errorbar(orientation = "y", width = 0.3) +
+  scale_colour_manual(values = unname(PairedColor12Steps)[7:10],
+                      name = "Intervention", guide = "none") +
+  labs(x = "Mean MCS score (95% CI)", y = NULL) +
+  facet_wrap(~method, ncol = 1) +
+  theme(panel.grid.minor = element_blank())
+
+
+ggsave(
+  here::here("figs", "simple_model_results.png"),
+  width = 8,
+  height = 10,
+  dpi = 300
+)
+```
+
+
+
+
+
+

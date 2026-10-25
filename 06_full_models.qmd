@@ -1,0 +1,249 @@
+---
+title: "Models with full set of covariates (time-invariant + PCS)"
+author: "Darwin Del Castillo"
+format: 
+  html:
+    number-sections: true
+    
+editor: source
+---
+
+# Data
+Data comes from the UK Household Longitudinal Study (UKHLS), also known as Understanding Society. We use data from waves 3 and 10, which were collected from 2011 to 2020. 
+
+```{r setup}
+#| output: false
+here::i_am("06_full_models.qmd")
+
+pacman::p_load(gfoRmula,
+               gFormulaMI,
+               DiagrammeR,
+               tidyverse,
+               purrr,
+               magrittr,
+               colorBlindness,
+               ltmle,
+               mice,
+               SuperLearner,
+               targets,
+               knitr)
+
+# Quarto renders from report/, but the targets store lives at the project root. 
+# Passing absolute path to every tar_read() below so resolution doesn't depend on the working directory.
+tar_store <- here::here("_targets")
+
+source(here::here("fnct", "import_cleaning.R"))
+source(here::here("fnct", "helpers.R"))
+```
+
+# Model specification: Two waves of data, time-invariant covariates + PCS
+In this model, we include 3 waves of data (waves 3 to 5) and adjust for time-invariant covariates and the physical component summary (PCS) score. The model is specified as follows: \
+**Notation** \
+- $TI_{cov}$: Time-invariant covariates: \
+    - Sex (sex_dv) \
+    - Ethnicity (race_dv) \
+    - Highest educational qualification (hiqual_dv) \
+    - Region of residence (GOR) (gor_dv) \
+- $PCS_{t-1}$, $PCS_{t}$, $PCS_{t+1}$: Physical component summary score at time points t-1, t, and t+1 \
+- $IC_{t}$, $IC_{t+1}$, $IC_{t+2}$: Intermediate confounders (lagged) at time points t, t+1, and t+2, which include: \
+   - Number of dependents (0, 1, 2+) \
+   - Economic benefits receipt (yes/no) \
+   - Home ownership status (yes/no) \
+   - Marital status (partnered vs not partnered) \
+- **Time-varying confounder:** age
+
+```{r model1}
+#| echo: false
+#| include: true
+#| fig-cap: "Direct Acyclic Graph showing causal assumptions for the present analysis. Only two nodes per variable are presented to avoid clutter."
+#| fig-width: 8
+#| fig-height: 10
+#| fig-align: center
+
+DiagrammeR::grViz("
+                  digraph{
+                  graph[rankdir=TB]
+
+                  node[fontname=Arial]
+                  TI [label=<<B><I>TI<SUB>cov</SUB></I></B>>]
+                  A1 [label=<<B><I>Age<SUB>t</SUB></I></B>>]
+                  A2 [label=<<B><I>Age<SUB>t+1</SUB></I></B>>]
+                  C1 [label=<<B><I>CF<SUB>t-1</SUB></I></B>>]
+                  C2 [label=<<B><I>CF<SUB>t</SUB></I></B>>]
+                  I1 [label=<<B><I>IC<SUB>t</SUB></I></B>>]
+                  I2 [label=<<B><I>IC<SUB>t+1</SUB></I></B>>]
+                  J1 [label=<<B><I>Emp<SUB>t</SUB></I></B>>]
+                  J2 [label=<<B><I>Emp<SUB>t+1</SUB></I></B>>]
+                  E1 [label=<<B><I>FD<SUB>t</SUB></I></B>>, 
+                      fontcolor=deepskyblue4, 
+                      color=deepskyblue4]
+                  E2 [label=<<B><I>FD<SUB>t+1</SUB></I></B>>, 
+                      fontcolor=deepskyblue4, 
+                      color=deepskyblue4]
+                  Y0 [label=<<B><I>MCS<SUB>b</SUB></I></B>>, 
+                      fontcolor=darkorange2, 
+                      color=darkorange2]
+                  Y1 [label=<<B><I>MCS<SUB>t</SUB></I></B>>, 
+                      fontcolor=darkorange2, 
+                      color=darkorange2]
+                  Y2 [label=<<B><I>MCS<SUB>t+1</SUB></I></B>>, 
+                      fontcolor=darkorange2, 
+                      color=darkorange2]
+
+                  E1 -> E2 
+                  Y0 -> Y1
+                  Y1 -> Y2
+                  A1 -> A2
+                  C1 -> C2
+                  J1 -> J2
+                  I1 -> I2
+
+                  TI -> E1, E2, C1, C2, Y0, Y1, Y2, I1, I2, J1, J2
+
+                  A1 -> C1, E1, Y1, J1, I1
+                  A2 -> C2, E2, Y2, J2, I2
+
+                  C1 -> E1, Y1, J1
+                  C2 -> E2, Y2, J2
+                  
+                  I1 -> E1, Y1, J2
+                  I2 -> E2, Y2
+
+                  J1 -> E1, Y1, I1
+                  J2 -> E2, Y2, I2
+
+                  E1 -> C2
+                  E1 -> Y1 
+                  E2 -> Y2
+                  
+                  Y0 -> C1, J1, I1, E1
+                  Y1 -> C2, J2, I2
+                  Y1 -> E2
+
+                  {rank=min; TI}
+                  {rank=same; A1, A2}
+                  {rank=same; C1, C2}
+                  {rank=same; E1, E2}
+                  {rank=same; I1, I2}
+                  {rank=same; J1, J2}
+                  {rank=max; Y0, Y1, Y2}
+            }
+                  "
+)
+```
+
+# Data preparation
+The data is prepared by creating a long format dataset with one row per individual per time point. The report retrieves cached information from `_targets.R` at the repo root.
+
+```{r data_prep}
+#| output: false
+wide_data <- tar_read(wide_data, store = tar_store)
+seed_random <- 20260522
+```
+
+# Multiple imputation (wide format)
+```{r mice-gformula}
+#| output: false
+wide_mids <- tar_read(wide_mids, store = tar_store)
+```
+
+# `mice` positivity check
+```{r mice-positivity}
+#| output: false
+#| include: true
+#| eval: false
+
+positivity_results <- function(mids_obj) {
+  mice::complete(mids_obj, action = "long", include = FALSE) |>
+    group_by(.imp,
+             econ_dist_bin_0,
+             econ_dist_bin_1,
+             econ_dist_bin_2) |>
+    summarise(n = n(), .groups = "drop") |>
+    group_by(econ_dist_bin_0,
+             econ_dist_bin_1,
+             econ_dist_bin_2) |>
+    summarise(
+      mean_n = round(mean(n), 0),
+      min_n  = min(n),
+      max_n  = max(n),
+      n_imp_with_zero = sum(n == 0),
+      .groups = "drop"
+    )
+}
+
+print(positivity_results(wide_mids))
+```
+
+# Main analysis: LTMLE with multiple imputation
+The LTMLE sweep over the 8 regime × imputation pairs is computed by the targets DAG (`R/fit_ltmle_one.R` + `R/pool_ltmle.R`); each branch dispatches as a separate SLURM job via `future.batchtools` (template: `slurm.tmpl`). The pooled tibble is read in below.
+
+```{r ltmle-mi}
+#| output: false
+#| include: true
+ltmle_results <- tar_read(ltmle_results, store = tar_store)
+```
+
+
+# Sensitivity analyses: g-formula and IPTW
+
+## G-formula via multiple imputation
+
+### Imputing counterfactual outcomes under each regime using `gFormulaMI`
+```{r gformula-mi}
+#| include: false
+#| output: false
+mi_results <- tar_read(mi_results, store = tar_store)
+```
+
+### Table with results from all models
+```{r table-results}
+#| output: true
+#| include: true
+iptw_results <- tar_read(iptw_results, store = tar_store)
+comparison   <- tar_read(comparison, store = tar_store)
+
+comparison |> knitr::kable(digits = 3)
+```
+
+```{r plot_results}
+#| output: true
+#| include: true
+
+# Combine results into a single data frame for plotting
+results_comparison <- comparison |>
+  pivot_longer(
+    -intervention,
+    names_to = c("method", ".value"),
+    names_pattern = "(.*)_(.*)"
+  ) |>
+  mutate(
+    method = factor(method,
+                    levels = c("ltmle", "mi"),
+                    labels = c("LTMLE", "G-Formula MI")),
+    intervention = factor(intervention,
+                          levels = c("0-0-0", "0-0-1", "0-1-0", "0-1-1", "1-0-0", "1-0-1", "1-1-0", "1-1-1"),
+  )) |>
+  ggplot(aes(x = effect, y = intervention,
+             colour = intervention,
+             xmin = ll, xmax = ul)) +
+  theme_bw() +
+  geom_point(size = 2.5) +
+  geom_errorbar(orientation = "y", width = 0.3) +
+  scale_colour_brewer(palette = "Set1",
+                      name = "Intervention",
+                      guide = "legend") +
+  scale_x_continuous(breaks = seq(39, 51, by = 2)) +
+  labs(x = "Mean MCS score (95% CI)", y = NULL) +
+  facet_wrap(~method, ncol = 1) +
+  theme(panel.grid.minor = element_blank())
+
+print(results_comparison)
+
+ggsave(
+  filename = here::here("figs", "results_comparison.png"),
+  plot     = results_comparison,
+  width = 6, height = 8, dpi = 300
+)
+
+```
