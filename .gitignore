@@ -24,3 +24,5 @@ report/*
 CLAUDE.md
 .claude
 update.sh
+/.quarto/
+**/*.quarto_ipynb
