@@ -5,6 +5,7 @@ author: "Darwin Del Castillo"
 format:
   html:
     number-sections: true
+toc: false
 
 editor: source
 ---
@@ -110,7 +111,7 @@ if (knitr::is_html_output()) {
   # PDF and docx cannot embed the htmlwidget, so render the same DOT source to
   # a file and include that: vector for LaTeX, raster for everything else.
   ext <- if (knitr::is_latex_output()) "pdf" else "png"
-  dag_file <- here::here("output", "figs", "dag", paste0("dag_single_treatment.", ext))
+  dag_file <- here::here("outputs", "figs", "dag", paste0("dag_single_treatment.", ext))
   dir.create(dirname(dag_file), recursive = TRUE, showWarnings = FALSE)
 
   if (requireNamespace("DiagrammeRsvg", quietly = TRUE) &&
@@ -143,46 +144,46 @@ The data is prepared by creating a panel dataset with one row per individual per
 # tar_map() suffixes every target with its outcome scale
 
 wide_data <- list(
-  MCS_w8 = tar_read(wide_data_w8_MCS, store = tar_store),
-  PCS_w8 = tar_read(wide_data_w8_PCS, store = tar_store),
   MCS_w3 = tar_read(wide_data_w3_MCS, store = tar_store),
   PCS_w3 = tar_read(wide_data_w3_PCS, store = tar_store),
+  MCS_w8 = tar_read(wide_data_w8_MCS, store = tar_store),
+  PCS_w8 = tar_read(wide_data_w8_PCS, store = tar_store),
   MCS_w13 = tar_read(wide_data_w13_MCS, store = tar_store),
   PCS_w13 = tar_read(wide_data_w13_PCS, store = tar_store)
 )
 
 tmle_results <- list(
-  MCS_w8 = tar_read(tmle_results_w8_MCS, store = tar_store),
-  PCS_w8 = tar_read(tmle_results_w8_PCS, store = tar_store),
   MCS_w3 = tar_read(tmle_results_w3_MCS, store = tar_store),
   PCS_w3 = tar_read(tmle_results_w3_PCS, store = tar_store),
+  MCS_w8 = tar_read(tmle_results_w8_MCS, store = tar_store),
+  PCS_w8 = tar_read(tmle_results_w8_PCS, store = tar_store),
   MCS_w13 = tar_read(tmle_results_w13_MCS, store = tar_store),
   PCS_w13 = tar_read(tmle_results_w13_PCS, store = tar_store)
 )
 
 comparison <- list(
-  MCS_w8 = tar_read(comparison_w8_MCS, store = tar_store),
-  PCS_w8 = tar_read(comparison_w8_PCS, store = tar_store),
   MCS_w3 = tar_read(comparison_w3_MCS, store = tar_store),
   PCS_w3 = tar_read(comparison_w3_PCS, store = tar_store),
+  MCS_w8 = tar_read(comparison_w8_MCS, store = tar_store),
+  PCS_w8 = tar_read(comparison_w8_PCS, store = tar_store),
   MCS_w13 = tar_read(comparison_w13_MCS, store = tar_store),
   PCS_w13 = tar_read(comparison_w13_PCS, store = tar_store)
 )
 
 cate_results <- list(
-  MCS_w8 = tar_read(cate_results_w8_MCS, store = tar_store),
-  PCS_w8 = tar_read(cate_results_w8_PCS, store = tar_store),
   MCS_w3 = tar_read(cate_results_w3_MCS, store = tar_store),
   PCS_w3 = tar_read(cate_results_w3_PCS, store = tar_store),
+  MCS_w8 = tar_read(cate_results_w8_MCS, store = tar_store),
+  PCS_w8 = tar_read(cate_results_w8_PCS, store = tar_store),
   MCS_w13 = tar_read(cate_results_w13_MCS, store = tar_store),
   PCS_w13 = tar_read(cate_results_w13_PCS, store = tar_store)
 )
 
 tmle_sens1_results <- list(
-  MCS_w8 = tar_read(tmle_sens1_results_w8_MCS, store = tar_store),
-  PCS_w8 = tar_read(tmle_sens1_results_w8_PCS, store = tar_store),
   MCS_w3 = tar_read(tmle_sens1_results_w3_MCS, store = tar_store),
   PCS_w3 = tar_read(tmle_sens1_results_w3_PCS, store = tar_store),
+  MCS_w8 = tar_read(tmle_sens1_results_w8_MCS, store = tar_store),
+  PCS_w8 = tar_read(tmle_sens1_results_w8_PCS, store = tar_store),
   MCS_w13 = tar_read(tmle_sens1_results_w13_MCS, store = tar_store),
   PCS_w13 = tar_read(tmle_sens1_results_w13_PCS, store = tar_store)
 )
@@ -201,11 +202,20 @@ bind_scales <- function(x, f = identity) {
 We fit a single-exposure TMLE: the exposure is financial distress (`econ_dist_bin_0`) and the outcome is an SF-12 component summary — mental (`sf12mcs_dv_0`) or physical (`sf12pcs_dv_0`). Each of these outcomes was estimated with their own set of confounders. The table reports, pooled across imputations with Rubin's rules and in points on the scale named in each row, the two counterfactual means, the marginal means and the average causal effect.
 
 ```{r fit-tmle}
-knitr::kable(
-  bind_scales(tmle_results),
-  digits  = 3,
-  caption = "Pooled point-exposure TMLE estimates by SF-12 scale"
-)
+main_results <- bind_scales(tmle_results)
+waves <- levels(main_results$wave)
+
+main_results |>
+  pivot_wider(names_from  = wave,
+              values_from = c(effect, se, ll, ul),
+              names_vary  = "slowest") |>
+  knitr::kable(
+    digits    = 3,
+    col.names = c("Scale", "Estimand", "Type",
+                  rep(c("Effect", "SE", "LL", "UL"), length(waves))),
+    caption   = "TMLE estimates by SF-12 scale"
+  ) |>
+  kableExtra::add_header_above(c(" " = 3, setNames(rep(4, length(waves)), sub("w", "Wave ", waves))))
 ```
 
 # Sensitivity analysis: g-formula with multiple imputation
@@ -214,32 +224,73 @@ We fit a g-formula model with multiple imputation, using the same model specific
 ## Counterfactual means
 ```{r fit-sensitivity}
 marginals <- bind_scales(comparison, \(x) x$marginal)
+waves <- levels(marginals$wave)
 
-knitr::kable(
-  marginals,
-  digits  = 3,
-  caption = "Comparison of pooled point-exposure TMLE and g-formula MI estimates by SF-12 scale."
-)
+marginals |>
+  pivot_longer(
+    -c(wave, scale, intervention),
+    names_to = c("method", ".value"),
+    names_pattern = "(.*)_(.*)"
+  ) |>
+  mutate(method = factor(method,
+                         levels = c("tmle", "mi"),
+                         labels = c("TMLE", "G-Formula MI"))) |>
+  arrange(scale, method) |>
+  pivot_wider(names_from  = wave,
+              values_from = c(effect, se, ll, ul),
+              names_vary  = "slowest") |>
+  knitr::kable(
+    digits    = 3,
+    col.names = c("Scale", "Intervention", "Method",
+                  rep(c("Effect", "SE", "LL", "UL"), length(waves))),
+    caption   = "Comparison of TMLE and g-formula MI estimates by SF-12 scale."
+  ) |>
+  kableExtra::add_header_above(c(" " = 3, setNames(rep(4, length(waves)), sub("w", "Wave ", waves))))
 ```
 
 ## Average causal effect
 ```{r fit-sensitivity-ate}
 ate <- bind_scales(comparison, \(x) x$ate)
+waves <- levels(ate$wave)
 
-knitr::kable(
-  ate,
-  digits  = 3,
-  caption = "Comparison of pooled point-exposure TMLE and g-formula MI estimates by SF-12 scale."
-)
+ate |>
+  pivot_longer(
+    -c(wave, scale, estimand),
+    names_to = c("method", ".value"),
+    names_pattern = "(.*)_(.*)"
+  ) |>
+  mutate(method = factor(method,
+                         levels = c("tmle", "mi"),
+                         labels = c("TMLE", "G-Formula MI"))) |>
+  arrange(scale, method) |>
+  pivot_wider(names_from  = wave,
+              values_from = c(effect, se, ll, ul),
+              names_vary  = "slowest") |>
+  knitr::kable(
+    digits    = 3,
+    col.names = c("Scale", "Estimand", "Method",
+                  rep(c("Effect", "SE", "LL", "UL"), length(waves))),
+    caption   = "Comparison of TMLE and g-formula MI estimates by SF-12 scale."
+  ) |>
+  kableExtra::add_header_above(c(" " = 3, setNames(rep(4, length(waves)), sub("w", "Wave ", waves))))
 ```
 
 # Sensitivity 2: TMLE with gbound = 0.025, to explore potential effect of positivity violations
 ```{r fit-tmle-gbound}
-knitr::kable(
-  bind_scales(tmle_sens1_results),
-  digits  = 3,
-  caption = "Pooled point-exposure TMLE estimates by SF-12 scale bounding at the propensity score at 0.025 and 0.975."
-)
+sens1_results <- bind_scales(tmle_sens1_results)
+waves <- levels(sens1_results$wave)
+
+sens1_results |>
+  pivot_wider(names_from  = wave,
+              values_from = c(effect, se, ll, ul),
+              names_vary  = "slowest") |>
+  knitr::kable(
+    digits    = 3,
+    col.names = c("Scale", "Estimand", "Type",
+                  rep(c("Effect", "SE", "LL", "UL"), length(waves))),
+    caption   = "TMLE estimates by SF-12 scale bounding at the propensity score at 0.025 and 0.975."
+  ) |>
+  kableExtra::add_header_above(c(" " = 3, setNames(rep(4, length(waves)), sub("w", "Wave ", waves))))
 ```
 
 ```{r plot-helpers}
@@ -267,7 +318,7 @@ Population mean SF-12 score under each counterfactual exposure scenario, for bot
 #| include: true
 #| eval: true
 #| column: page
-#| fig-cap: "Pooled marginal means of the SF-12 mental (MCS) and physical (PCS) component summaries under financial distress vs no distress (95% CI), by window (waves 3, 8 and 13)."
+#| fig-cap: "Marginal means of the SF-12 mental (MCS) and physical (PCS) component summaries under financial distress vs no distress (95% CI), by window (waves 3, 8 and 13). The first row corresponds to results from the TMLE model, whereas the second row corresponde to the g-formula model"
 #| fig-width: 14
 #| fig-height: 3.5
 
@@ -298,6 +349,7 @@ results_comparison_marginal <- plot_by_wave(
                         name = "Intervention",
                         guide = "legend") +
     labs(x = "Mean SF-12 score (95% CI)", y = NULL) +
+    scale_x_continuous(breaks = seq(35, 54, 2)) +
     facet_grid(method ~ scale, scales = "fixed") +
     theme(panel.grid.minor = element_blank()),
   xlim = range(means_long$ll, means_long$ul)
@@ -319,7 +371,7 @@ ggsave(
 #| include: true
 #| eval: true
 #| column: page
-#| fig-cap: "Pooled ATE of the SF-12 mental (MCS) and physical (PCS) component summaries under financial distress vs no distress (95% CI), by window (waves 3, 8 and 13)."
+#| fig-cap: "Average treatment effect (ATE) of the SF-12 mental (MCS) and physical (PCS) component summaries under financial distress vs no distress (95% CI), by window (waves 3, 8 and 13). The first row corresponds to results from the TMLE model, whereas the second row corresponde to the g-formula model"
 #| fig-width: 14
 #| fig-height: 3.5
 
@@ -352,6 +404,7 @@ results_comparison_ate <- plot_by_wave(
                         guide = "legend") +
     labs(x = "Causal mean difference in SF-12 score (95% CI)
   (Reference: unexposed)", y = NULL) +
+    scale_x_continuous(breaks = seq(-9, 0.5, 1)) +
     facet_grid(method ~ scale, scales = "fixed") +
     theme(panel.grid.minor = element_blank()),
   xlim = range(0, ate_long$ll, ate_long$ul)
@@ -380,19 +433,27 @@ $Y^{a=0}$ is the counterfactual SF-12 score had the person not been in financial
 
 ```{r cate-table}
 #| output: true
+#| column: screen-inset
 gate <- bind_scales(cate_results, \(x) x$gate)
+waves <- levels(gate$wave)
 
 gate |>
-  arrange(scale, wave, desc(estimate)) |>
-  select(scale, wave, strata_label, n_j_min, n_j_max, pct_exposed, min_g, median_g,
-         share_g_at_bound, estimate, ll, ul) |>
+  select(scale, wave, strata_id, strata_label, estimate, ll, ul) |>
+  # names_sort orders the blocks by factor level (wave, then scale) so they line up with the spanners.
+  pivot_wider(names_from  = c(wave, scale),
+              values_from = c(estimate, ll, ul),
+              names_vary  = "slowest",
+              names_sort  = TRUE) |>
+  arrange(strata_id) |>
+  select(-strata_id) |>
   knitr::kable(
-    digits    = c(NA, NA, NA, 0, 0, 1, 3, 3, 3, 2, 2, 2),
-    col.names = c("Scale","Wave", "Stratum (sex:race:education)", "n (min)", "n (max)",
-                  "% exposed", "min ĝ", "median ĝ", "share ĝ at bound",
-                  "Effect (Δ)", "LL", "UL"),
+    digits    = 2,
+    col.names = c("Stratum (sex:race:education)",
+                  rep(c("Effect (Δ)", "LL", "UL"), length(waves) * length(scales))),
     caption   = "Stratum-specific average causal effects by SF-12 scale, pooled across imputations with Rubin's rules"
-  )
+  ) |>
+  kableExtra::add_header_above(c(" " = 1, setNames(rep(3, length(waves) * length(scales)), rep(scales, length(waves))))) |>
+  kableExtra::add_header_above(c(" " = 1, setNames(rep(3 * length(scales), length(waves)), sub("w", "Wave ", waves))))
 ```
 
 ## Is the effect modification real?
@@ -400,12 +461,20 @@ To asses this question, we included the Chernozhukov *best linear predictor* (BL
 
 ```{r cate-heterogeneity}
 #| output: true
-bind_scales(cate_results, \(x) x$blp) |>
+blp <- bind_scales(cate_results, \(x) x$blp)
+waves <- levels(blp$wave)
+
+blp |>
+  pivot_wider(names_from  = wave,
+              values_from = c(estimate, se, ll, ul),
+              names_vary  = "slowest") |>
   knitr::kable(
     digits    = 3,
-    col.names = c("Scale", "Wave", "Term", "Estimate", "SE", "LL", "UL"),
-    caption = "BLP test for effect modification by SF-12 scale, pooled across imputations (HC3 robust SEs within imputation). beta1_ate is the population-average effect on the conventional $Y^{a=1} - Y^{a=0}$ scale and should sit near the TMLE average causal effect in magnitude. beta2_hte ≠ 0 is evidence that the 12 strata genuinely differ."
-  )
+    col.names = c("Scale", "Term",
+                  rep(c("Estimate", "SE", "LL", "UL"), length(waves))),
+    caption = "BLP test for effect modification by SF-12 scale, pooled across imputations (HC3 robust SEs within imputation). beta1_ate is the population-average effect on the conventional \\(Y^{a=1} - Y^{a=0}\\) scale and should sit near the TMLE average causal effect in magnitude. beta2_hte ≠ 0 is evidence that the 12 strata genuinely differ."
+  ) |>
+  kableExtra::add_header_above(c(" " = 2, setNames(rep(4, length(waves)), sub("w", "Wave ", waves))))
 ```
 
 ```{r wald-test}
@@ -481,7 +550,7 @@ bind_rows(
 #| column: page
 #| fig-cap: "Stratum-specific average causal effect of financial distress on the SF-12 mental (MCS) and physical (PCS) component summaries (95% CI), by window (waves 3, 8 and 13). The estimates are represented in positive values, thus should be interpreted as points lost to distress. Strata are ordered by the wave 8 MCS effect. Dashed line represents that scale's and window's marginal TMLE average causal effect."
 #| fig-width: 15
-#| fig-height: 4.5
+#| fig-height: 6
 
 # One stratum order for every window (sorted by the index window's MCS effect),
 # so the rows line up across the three panels.
@@ -505,6 +574,7 @@ cate_caterpillar <- plot_by_wave(
     geom_pointrange(aes(xmin = ll, xmax = ul), size = 0.4) +
     labs(x = "SF-12 points lost to financial distress (95% CI)",
          y = NULL) +
+    scale_x_continuous(breaks = seq(-20, 20, 5)) +
     facet_wrap(~scale, scales = "fixed") +
     theme(panel.grid.minor = element_blank()),
   xlim = range(0, gate$ll, gate$ul)
@@ -515,7 +585,7 @@ print(cate_caterpillar)
 ggsave(
   filename = here::here("outputs", "figs", "cate_caterpillar.png"),
   plot     = cate_caterpillar,
-  width = 15, height = 4.5, dpi = 300
+  width = 15, height = 6, dpi = 300
 )
 ```
 
