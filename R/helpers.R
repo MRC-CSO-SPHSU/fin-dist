@@ -52,7 +52,7 @@ make_wide <- function(df, id_col, time_col, base_cols, outcome, ..., static = FA
   attr(df_out, "baseline_vars") <- names(dplyr::select(df_out, {{base_cols}}))
   attr(df_out, "time_lagged")   <- names(dplyr::select(df_out, contains("lagged")))
   attr(df_out, "outcome_var")   <- paste0(outcome_name, "_", t_max)
-  attr(df_out, "outcome_baseline") <- paste0(outcome_name, "_base")
+  attr(df_out, "outcome_baseline") <- intersect(paste0(outcome_name, "_base"), names(df_out))
   attr(df_out, "time_points") <- length(unique(df |> dplyr::pull({{time_col}})))
   attr(df_out, "intermediate_vars") <- names(dplyr::select(df_out, !contains("lagged"), -c({{base_cols}})))
 

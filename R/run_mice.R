@@ -73,7 +73,7 @@ run_mice <- function(wide_data, m = 10, maxit = 10, seed = 20260522,
   # so the imputation model must include S too, otherwise imputed values are drawn 
   # under effect homogeneity and bias towards the null GATE estimates.
 
-  y_col <- if (outcome == "MCS") "sf12mcs_dv_0" else "sf12pcs_dv_0"  # wave-3 outcome only
+  y_col <- if (outcome == "MCS") "sf12mcs_dv_0" else "sf12pcs_dv_0"
   a_col <- "econ_dist_bin_0"
   S     <- "sex_dv_fact_base * race_base * hiqual_dv_fact_base"
 

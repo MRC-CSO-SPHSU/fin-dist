@@ -5,7 +5,7 @@ build_data <- function(data, pre_wave = 2, target_wave = 3, base_wave = 1,
   outcome <- match.arg(outcome)
 
   # Baseline data generation: Baseline will change depending of the analytic window we choose
-  base_cols <- c("pidp", "wave", "sex_dv_fact", "race", "hiqual_dv_fact", "sf12mcs_dv", "sf12pcs_dv")
+  base_cols <- c("pidp", "wave", "sex_dv_fact", "race", "hiqual_dv_fact")
   DT_base <- data[wave == base_wave, ..base_cols]
 
   setnames(DT_base, setdiff(names(DT_base), c("pidp", "wave")),
@@ -36,14 +36,13 @@ build_data <- function(data, pre_wave = 2, target_wave = 3, base_wave = 1,
         by = pidp
     ][wave %in% target_wave]
 
-  # Drop pidps with no usable MCS/PCS: baseline missing
-  outcome_col <- if (outcome == "MCS") "sf12mcs_dv" else "sf12pcs_dv"
-  base_col    <- paste0(outcome_col, "_base")
+  # Drop pidps with no usable MCS/PCS: lagged column unusable
+  lag_col <- if (outcome == "MCS") "mcs_lagged" else "pcs_lagged"
 
   bad_pidps <- int_data_wide[
-    , .(base_na = any(is.na(get(base_col)))),
+    , .(lag_na = any(is.na(get(lag_col)))),
     by = pidp
-  ][(base_na), pidp]
+  ][(lag_na), pidp]
 
   final_data <- int_data_wide[!pidp %in% bad_pidps]
   
@@ -59,12 +58,12 @@ build_data <- function(data, pre_wave = 2, target_wave = 3, base_wave = 1,
       t0,
       base_cols = c(sex_dv_fact_base,
                     hiqual_dv_fact_base,
-                    race_base,
-                    sf12mcs_dv_base),
+                    race_base),
       outcome = sf12mcs_dv,
       age_dv,
       gor_dv_fact,
       pcs_lagged,
+      mcs_lagged,
       econ_dist_bin,
       econ_dist_bin_lagged,
       dnc_lagged,
@@ -82,12 +81,12 @@ build_data <- function(data, pre_wave = 2, target_wave = 3, base_wave = 1,
         t0,
         base_cols = c(sex_dv_fact_base,
                       hiqual_dv_fact_base,
-                      race_base,
-                      sf12pcs_dv_base),
+                      race_base),
         outcome = sf12pcs_dv,
         age_dv,
         gor_dv_fact,
         mcs_lagged,
+        pcs_lagged,
         econ_dist_bin,
         econ_dist_bin_lagged,
         dnc_lagged,

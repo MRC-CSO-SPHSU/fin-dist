@@ -32,7 +32,7 @@ test_that("build_data produces expected output", {
 
   # single target wave: everything is _base or _0 (codebase-map 1)
   expected_cols <- c(
-    "sex_dv_base", "hiqual_dv_fact_base", "race_base", "sf12mcs_dv_base",
+    "sex_dv_base", "hiqual_dv_fact_base", "race_base",
     "sf12mcs_dv_0", "age_dv_0", "gor_dv_fact_0",
     "pcs_lagged_0", "econ_dist_bin_0", "econ_dist_bin_lagged_0",
     "dnc_lagged_0", "home_owner_lagged_0", "econ_benefits_lagged_0",
@@ -255,11 +255,10 @@ test_that("confounders returns the exact fit_tmle_one adjustment set", {
     c("sex_dv_base",
       "hiqual_dv_fact_base",
       "race_base",
-      "sf12mcs_dv_base",
+      "pcs_lagged_0",
       "age_dv_0",
       "gor_dv_fact_0",
       "econ_dist_bin_lagged_0",
-      "pcs_lagged_0",
       "dnc_lagged_0",
       "home_owner_lagged_0",
       "econ_benefits_lagged_0",
@@ -269,9 +268,9 @@ test_that("confounders returns the exact fit_tmle_one adjustment set", {
   )
   # PCS swaps exactly the two outcome-dependent entries
   expect_identical(setdiff(confounders("PCS"), confounders("MCS")),
-                   c("sf12pcs_dv_base", "mcs_lagged_0"))
+                   c("mcs_lagged_0"))
   expect_identical(setdiff(confounders("MCS"), confounders("PCS")),
-                   c("sf12mcs_dv_base", "pcs_lagged_0"))
+                   c("pcs_lagged_0"))
   expect_error(confounders("XXX"))
 })
 
