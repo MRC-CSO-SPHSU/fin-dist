@@ -217,5 +217,5 @@ list(
               command = dplyr::bind_rows(!!!.x, .id = "target")),
 
   # Single report covering both outcomes
-  tarchetypes::tar_quarto(report, "07_single_treatment.qmd")
+  tarchetypes::tar_quarto(report, "08_main.qmd")
 )
