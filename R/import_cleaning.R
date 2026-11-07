@@ -153,11 +153,11 @@ clean_data <- function(DT) {
 
   # age_probe: age with negative codes as NA, for composite variables (employment, partnership)
   # age_dv in UKHLS is coded as 0 for inconsistent ,1 for male and 2 for female
-  raw_data[, age_probe := fifelse(age_dv <= 0, NA_integer_, as.integer(age_dv))]
+  raw_data[, age_probe := fifelse(age_dv < 0, NA_integer_, as.integer(age_dv))]
 
   # gender_probe: female (sex_dv 2) recoded to 0, other codes kept
-  raw_data[, gender_probe := fifelse(sex_dv == 2, 0, sex_dv)]
-
+  raw_data[, gender_probe := fcase(sex_dv == 1, 1, 
+                                   sex_dv == 2, 0)]
   # has_partner: 1 = has partner, 0 = not
   raw_data[, has_partner := fifelse(partnerid > 0 & !is.na(partnerid), 1L, 0L)]
 
@@ -391,6 +391,7 @@ clean_data <- function(DT) {
   # sex_dv: 0/1 gender_probe replaces the 1/2 coding; rows with missing sex (NA, -9, 0) dropped
   raw_data <- raw_data[!is.na(gender_probe) & gender_probe <= 0]
   raw_data[, sex_dv := factor(gender_probe, levels = c(0, 1), labels = c("Female", "Male"))]
+  raw_data <- raw_data[!is.na(gender_probe)]
 
   # age_dv: overwrite with age_probe (original has negative missing codes)
   raw_data[, age_dv := age_probe]
