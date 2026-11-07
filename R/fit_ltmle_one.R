@@ -26,8 +26,9 @@ fit_ltmle_one <- function(wide_mids, imp_idx, sl_libs, outcome, regimes,
 
   # W, all measured pre-exposure. Shared with estimate_cate() via
   # R/confounders.R: do not inline a copy here.
-  W <- confounders(outcome)
-  L <- time_varying_confounders(outcome)
+  confounders <- confounders(outcome)
+  W <- grep("_1$", confounders, value = TRUE, invert = TRUE)
+  L <- grep("_1$", confounders, value = TRUE)
   A <- c("econ_dist_bin_0", "econ_dist_bin_1")
   Y <- if (outcome == "MCS") "sf12mcs_dv_1" else "sf12pcs_dv_1"
 
