@@ -35,10 +35,12 @@ wide_cols_mcs <- c(
   "dnc_lagged_1", "home_owner_lagged_1", "econ_benefits_lagged_1",
   "mastat_lagged_1", "econ_emp_bin_fact_1", "log_income_1", "sf12mcs_dv_1"
 )
-# ltmle_regimes and sl_cv_control from _targets.R: c(A0, A1), first = reference
+# ltmle_regimes, sl_cv_control and ltmle_bound from _targets.R: c(A0, A1), first = reference
 toy_regimes <- list(never = c(0L, 0L), before = c(1L, 0L),
                     now = c(0L, 1L), permanent = c(1L, 1L))
 toy_cv <- list(V = 5L, stratifyCV = FALSE, shuffle = TRUE)
+# fit_ltmle_one() passes gbound straight to ltmle's gbounds: c(lower, upper) on the cumulative g
+toy_gbound <- c(0.001, 0.999)
 # fit_ltmle_one()/pool_ltmle() rows: 4 regime means, then 3 contrasts
 ltmle_estimands <- c("never", "before", "now", "permanent",
                      "before - never", "now - never", "permanent - never")
@@ -63,8 +65,7 @@ test_that("build_data produces expected output", {
   # econ_dist_bin_lagged_1 is A0 itself: dropped, from the attribute too
   expect_false("econ_dist_bin_lagged_1" %in% names(wide_data))
   expect_false("econ_dist_bin_lagged_1" %in% attr(wide_data, "time_lagged"))
-  expect_true(all(c(confounders("MCS"), time_varying_confounders("MCS")) %in%
-                    names(wide_data)))
+  expect_true(all(confounders("MCS") %in% names(wide_data)))
 })
 
 ### make_counterfactual_method: the methods gFormulaImpute() draws the
@@ -173,7 +174,7 @@ test_that("fit_ltmle_one runs on the real 2-wave data", {
                        outcome       = "MCS",
                        regimes       = toy_regimes,
                        sl_cv_control = toy_cv,
-                       gbound        = 0.001)
+                       gbound        = toy_gbound)
 
   # a compact table, not the ltmleMSM fit: 4 regime means + 3 contrasts
   expect_s3_class(res, "data.table")
@@ -262,8 +263,8 @@ test_that("how many strata will be for MAIHDA", {
 
 ## ---- DR-learner GATE arm (design 2026-07-30) --------------------------------
 
-### shared confounder set: byte-identical between fit_ltmle_one and estimate_cate
-test_that("confounders returns the exact ltmle baseline (W) set", {
+### shared confounder set: W (base + start wave), then L1 (final wave)
+test_that("confounders returns the exact ltmle adjustment set", {
   source(here::here("R", "confounders.R"))
 
   expect_identical(
@@ -281,23 +282,8 @@ test_that("confounders returns the exact ltmle baseline (W) set", {
       "econ_benefits_lagged_0",
       "mastat_lagged_0",
       "econ_emp_bin_fact_0",
-      "log_income_0")
-  )
-  # PCS swaps exactly the two outcome-dependent entries
-  expect_identical(setdiff(confounders("PCS"), confounders("MCS")),
-                   c("sf12pcs_dv_base", "mcs_lagged_0"))
-  expect_identical(setdiff(confounders("MCS"), confounders("PCS")),
-                   c("sf12mcs_dv_base", "pcs_lagged_0"))
-  expect_error(confounders("XXX"))
-})
-
-### L1: the confounders measured between A0 and A1
-test_that("time_varying_confounders returns the exact ltmle L1 set", {
-  source(here::here("R", "confounders.R"))
-
-  expect_identical(
-    time_varying_confounders("MCS"),
-    c("age_dv_1",
+      "log_income_0",
+      "age_dv_1",
       "gor_dv_fact_1",
       "pcs_lagged_1",
       "dnc_lagged_1",
@@ -307,20 +293,32 @@ test_that("time_varying_confounders returns the exact ltmle L1 set", {
       "econ_emp_bin_fact_1",
       "log_income_1")
   )
-  # PCS swaps only the other-scale lag; econ_dist_bin_lagged_1 (== A0) never enters
-  expect_identical(
-    time_varying_confounders("PCS"),
-    c("age_dv_1",
-      "gor_dv_fact_1",
-      "mcs_lagged_1",
-      "dnc_lagged_1",
-      "home_owner_lagged_1",
-      "econ_benefits_lagged_1",
-      "mastat_lagged_1",
-      "econ_emp_bin_fact_1",
-      "log_income_1")
-  )
-  expect_error(time_varying_confounders("XXX"))
+  # PCS swaps exactly the outcome-dependent entries
+  expect_identical(setdiff(confounders("PCS"), confounders("MCS")),
+                   c("sf12pcs_dv_base", "mcs_lagged_0", "mcs_lagged_1"))
+  expect_identical(setdiff(confounders("MCS"), confounders("PCS")),
+                   c("sf12mcs_dv_base", "pcs_lagged_0", "pcs_lagged_1"))
+  # econ_dist_bin_lagged_1 is A0 itself: never a confounder
+  expect_false("econ_dist_bin_lagged_1" %in% c(confounders("MCS"), confounders("PCS")))
+  expect_error(confounders("XXX"))
+})
+
+### the W / L1 split fit_ltmle_one() and estimate_cate() take by the _1 suffix
+test_that("confounders splits into W before A0 and L1 between A0 and A1", {
+  source(here::here("R", "confounders.R"))
+
+  purrr::walk(c("MCS", "PCS"), \(o) {
+    x <- confounders(o)
+    W <- grep("_1$", x, value = TRUE, invert = TRUE)
+    L <- grep("_1$", x, value = TRUE)
+    # W: base and start-wave columns only, in confounders() order
+    expect_true(all(grepl("_(base|0)$", W)))
+    expect_length(W, 14L)
+    # L1: the start-wave confounders measured again at the final wave, same order,
+    # minus the lagged exposure (its _1 copy is A0)
+    expect_identical(L, sub("_0$", "_1", setdiff(grep("_0$", W, value = TRUE),
+                                                 "econ_dist_bin_lagged_0")))
+  })
 })
 
 ### make_strata: pure df -> df, same id arithmetic as the old strata_creation()
@@ -485,8 +483,8 @@ test_that("sl_oof_predictions combines on the fit's own method scale", {
 })
 
 ### toy generators for the DR-learner tests (estimate_cate, pool_cate)
-# Synthetic wide frame shaped like the real one: all 14 columns of
-# confounders("MCS"), the exposure and the outcome. Balanced 12-cell design,
+# Synthetic wide frame shaped like the real one: the 14 W columns (no _1 suffix)
+# of confounders("MCS"), the exposure and the outcome. Balanced 12-cell design,
 # every A x S cell populated (deterministic 40% exposed per cell).
 # tau_by_cell: length-12, the treatment effect (conventional Y(1) - Y(0)
 # scale) per stratum, indexed in strata_id order (ids sorted ascending).
@@ -1144,7 +1142,7 @@ test_that("fit_ltmle_one equals separate ltmle fits per regime", {
 
   mids <- make_toy_2wave_mids(make_toy_2wave_df(), m = 1)
   # "glm" bypasses SuperLearner, so both sides are deterministic
-  r <- fit_ltmle_one(mids, 1, "glm", "MCS", toy_regimes, toy_cv, 0.001)
+  r <- fit_ltmle_one(mids, 1, "glm", "MCS", toy_regimes, toy_cv, toy_gbound)
 
   expect_s3_class(r, "data.table")
   expect_named(r, c("imp", "estimand", "type", "estimate", "variance"))
@@ -1154,12 +1152,14 @@ test_that("fit_ltmle_one equals separate ltmle fits per regime", {
 
   # the ltmle data the contract specifies: W, A0, L1, A1, Y in node order, A integer
   A <- c("econ_dist_bin_0", "econ_dist_bin_1")
-  L <- time_varying_confounders("MCS")
-  d <- as.data.frame(mice::complete(mids, 1))[, c(confounders("MCS"), A[1], L, A[2], "sf12mcs_dv_1")]
+  x <- confounders("MCS")
+  W <- grep("_1$", x, value = TRUE, invert = TRUE)
+  L <- grep("_1$", x, value = TRUE)
+  d <- as.data.frame(mice::complete(mids, 1))[, c(W, A[1], L, A[2], "sf12mcs_dv_1")]
   d[A] <- purrr::map(d[A], \(a) as.integer(as.character(a)))
   ltmle_sep <- function(abar) {
     suppressMessages(ltmle::ltmle(d, Anodes = A, Lnodes = L, Ynodes = "sf12mcs_dv_1",
-                                  abar = abar, SL.library = "glm", gbounds = c(0.001, 1),
+                                  abar = abar, SL.library = "glm", gbounds = toy_gbound,
                                   variance.method = "ic", estimate.time = FALSE))
   }
 
@@ -1186,13 +1186,16 @@ test_that("fit_ltmle_one refuses stacked imputations and an unnamed cv control",
   mids <- make_toy_2wave_mids(make_toy_2wave_df(n_per_cell = 100), m = 2)
 
   # complete(action = 1:2) would silently stack the imputations
-  expect_error(fit_ltmle_one(mids, 1:2, "glm", "MCS", toy_regimes, toy_cv, 0.001),
+  expect_error(fit_ltmle_one(mids, 1:2, "glm", "MCS", toy_regimes, toy_cv, toy_gbound),
                "imp_idx")
   # ltmle checks only the names it is given, so SuperLearner would read an
   # unnamed list by position
   expect_error(fit_ltmle_one(mids, 1, "glm", "MCS", toy_regimes,
-                             list(5L, FALSE, TRUE, NULL), 0.001),
+                             list(5L, FALSE, TRUE, NULL), toy_gbound),
                "sl_cv_control")
+  # gbound goes straight to ltmle's gbounds, which needs c(lower, upper)
+  expect_error(fit_ltmle_one(mids, 1, "glm", "MCS", toy_regimes, toy_cv, 0.001),
+               "gbounds should have length 2")
 })
 
 test_that("pool_ltmle applies Rubin's rules and refuses a bare table", {
@@ -1238,8 +1241,7 @@ test_that("make_counterfactual_matrix follows the DAG and the ltmle adjustment s
 
   # the g-formula outcome model adjusts for exactly the ltmle W, L1, A0 and A1
   expect_setequal(colnames(pm)[pm["sf12mcs_dv_1", ] == 1],
-                  c(confounders("MCS"), time_varying_confounders("MCS"),
-                    "econ_dist_bin_0", "econ_dist_bin_1"))
+                  c(confounders("MCS"), "econ_dist_bin_0", "econ_dist_bin_1"))
   # the start-wave outcome is not a confounder: no parents, and it predicts
   # nothing (the regime row is all ones by construction)
   expect_true(all(pm["sf12mcs_dv_0", ] == 0))
@@ -1275,7 +1277,7 @@ test_that("toy pipeline: mice -> ltmle -> pool -> gformula -> comparison", {
   mids <- make_toy_2wave_mids(df, m = 20)
 
   ltmle_results <- purrr::map(1:2, \(i) {
-    fit_ltmle_one(mids, i, "glm", "MCS", toy_regimes, toy_cv, 0.001)
+    fit_ltmle_one(mids, i, "glm", "MCS", toy_regimes, toy_cv, toy_gbound)
   }) |> pool_ltmle()
 
   # gFormulaImpute()'s mice drops age_dv_0 from the age_dv_1 model (cor > .99)
