@@ -1,14 +1,12 @@
-# Diagnostics tests for a mice run.
-#
-# Combines the two information sources used when debugging imputation:
-#   1. mids$loggedEvents — messages that might indicate collinearity or other problems, 
-#      broken down per variable.
+# Diagnostics for a mice run:
+#   1. mids$loggedEvents (collinearity or other problems), per variable.
 #   2. A per-variable missingness + method + event-count table.
-#   3. Optional observed-vs-imputed plots (density for continuous, category
-#      proportions for factors) plus convergence traces, saved as PNGs.
+#   3. Optional PNGs: observed-vs-imputed plots (density for continuous,
+#      category proportions for factors) and convergence traces.
 #
-# Standalone: source this file and call diagnose_mice() on any mids object.
-#   diagnose_mice(mids, data_given_to_mice, plot_dir = "outputs/figs/mice_diag in dedicated folders according to dataset used")
+# Standalone: source this file, then call diagnose_mice() on any mids object,
+# with one plot folder per dataset:
+#   diagnose_mice(mids, data_given_to_mice, plot_dir = "outputs/figs/mice_diag/<dataset>")
 
 diagnose_mice <- function(mids, raw_data, plot_dir = NULL, plot_vars = NULL) {
   stopifnot(inherits(mids, "mids"), is.data.frame(raw_data))
@@ -51,19 +49,14 @@ diagnose_mice <- function(mids, raw_data, plot_dir = NULL, plot_vars = NULL) {
   if (!is.null(le)) {
     out_tokens <- trimws(unlist(strsplit(as.character(le$out), ",")))
   }
-  n_as_dep <- vapply(names(raw_data),
-                     function(v) if (is.null(le)) 0L else sum(le$dep == v),
-                     integer(1L))
-  n_as_out <- vapply(names(raw_data),
-                     function(v) sum(startsWith(out_tokens, v)),
-                     integer(1L))
+  n_as_dep <- purrr::map_int(names(raw_data),
+                             \(v) if (is.null(le)) 0L else sum(le$dep == v))
+  n_as_out <- purrr::map_int(names(raw_data), \(v) sum(startsWith(out_tokens, v)))
 
   summary_table <- data.frame(
     variable        = names(raw_data),
-    n_missing       = vapply(raw_data, function(x) sum(is.na(x)), integer(1L)),
-    pct_missing     = round(100 * vapply(raw_data,
-                                         function(x) mean(is.na(x)),
-                                         numeric(1L)), 1L),
+    n_missing       = purrr::map_int(raw_data, \(x) sum(is.na(x))),
+    pct_missing     = round(100 * purrr::map_dbl(raw_data, \(x) mean(is.na(x))), 1L),
     method          = unname(mids$method[names(raw_data)]),
     n_logged_as_dep = n_as_dep,
     n_logged_as_out = n_as_out,
@@ -84,15 +77,12 @@ diagnose_mice <- function(mids, raw_data, plot_dir = NULL, plot_vars = NULL) {
   if (!is.null(plot_dir)) {
     dir.create(plot_dir, recursive = TRUE, showWarnings = FALSE)
 
-    imp_counts <- vapply(mids$imp,
-                         function(x) if (is.null(x)) 0L else nrow(x),
-                         integer(1L))
+    imp_counts <- purrr::map_int(mids$imp, \(x) if (is.null(x)) 0L else nrow(x))
     if (is.null(plot_vars)) {
       plot_vars <- names(imp_counts)[imp_counts > 0L]
     }
 
-    # Wraps every plot: open its own png device, close exactly that device on
-    # exit
+    # every plot opens its own png device and closes exactly that one on exit
     save_png <- function(file, make_plot) {
       tryCatch({
         grDevices::png(file.path(plot_dir, file),
@@ -110,7 +100,7 @@ diagnose_mice <- function(mids, raw_data, plot_dir = NULL, plot_vars = NULL) {
 
     save_png("trace.png", function() plot(mids))
 
-    for (v in plot_vars) {
+    purrr::walk(plot_vars, \(v) {
       col <- raw_data[[v]]
       if (is.numeric(col)) {
         fml <- stats::as.formula(paste("~", v))
@@ -120,7 +110,7 @@ diagnose_mice <- function(mids, raw_data, plot_dir = NULL, plot_vars = NULL) {
         save_png(paste0("props_", v, ".png"), function() {
           lv  <- levels(col)
           obs <- factor(as.character(col[!is.na(col)]), levels = lv)
-          imp <- factor(unlist(lapply(mids$imp[[v]], as.character)),
+          imp <- factor(unlist(purrr::map(mids$imp[[v]], as.character)),
                         levels = lv)
           tab <- rbind(Observed = prop.table(table(obs)),
                        Imputed  = prop.table(table(imp)))
@@ -129,7 +119,7 @@ diagnose_mice <- function(mids, raw_data, plot_dir = NULL, plot_vars = NULL) {
                             main = v, ylab = "Proportion")
         })
       }
-    }
+    })
     cat("\nPlots written to ", plot_dir, "\n", sep = "")
   }
 

@@ -1,4 +1,4 @@
-# testing files of the pipeline and specific functions
+# Tests for the pipeline functions in R/.
 here::i_am("tests/test_code.R")
 
 ## reproducing targets environment
@@ -16,33 +16,59 @@ pacman::p_load(testthat,
   estimatr,
   car,
   lmtest,
-  sandwich)
+  sandwich,
+  ltmle,
+  gFormulaMI,
+  magrittr)
 
-## testing functions
-### does build_data not crash and produce the expected single-wave wide columns
+## shared constants. Defined up here because test_file(desc = ) runs only the
+## code above the matching test.
+# the 27 MCS wide_data columns, in build_data() order: _base, then _0
+# (start_wave) and _1 (final_wave)
+wide_cols_mcs <- c(
+  "sex_dv_fact_base", "hiqual_dv_fact_base", "race_base", "sf12mcs_dv_base",
+  "age_dv_0", "gor_dv_fact_0", "pcs_lagged_0", "econ_dist_bin_0",
+  "econ_dist_bin_lagged_0", "dnc_lagged_0", "home_owner_lagged_0",
+  "econ_benefits_lagged_0", "mastat_lagged_0", "econ_emp_bin_fact_0",
+  "log_income_0", "sf12mcs_dv_0",
+  "age_dv_1", "gor_dv_fact_1", "pcs_lagged_1", "econ_dist_bin_1",
+  "dnc_lagged_1", "home_owner_lagged_1", "econ_benefits_lagged_1",
+  "mastat_lagged_1", "econ_emp_bin_fact_1", "log_income_1", "sf12mcs_dv_1"
+)
+# ltmle_regimes and sl_cv_control from _targets.R: c(A0, A1), first = reference
+toy_regimes <- list(never = c(0L, 0L), before = c(1L, 0L),
+                    now = c(0L, 1L), permanent = c(1L, 1L))
+toy_cv <- list(V = 5L, stratifyCV = FALSE, shuffle = TRUE)
+# fit_ltmle_one()/pool_ltmle() rows: 4 regime means, then 3 contrasts
+ltmle_estimands <- c("never", "before", "now", "permanent",
+                     "before - never", "now - never", "permanent - never")
+
+### build_data: the two-wave wide columns
 test_that("build_data produces expected output", {
   source(here::here("R", "build_data.R"))
   source(here::here("R", "import_cleaning.R"))
   source(here::here("R", "helpers.R"))
+  source(here::here("R", "confounders.R"))
 
   pop_data <- import_data(force = FALSE) |> clean_data() |> preproc_data()
 
-  wide_data <- build_data(pop_data, outcome = "MCS")
+  wide_data <- build_data(pop_data, pre_wave = 1, base_wave = 2, start_wave = 3,
+                          final_wave = 4, outcome = "MCS")
   expect_true(is.data.frame(wide_data))
 
-  # single target wave: everything is _base or _0 (codebase-map 1)
-  expected_cols <- c(
-    "sex_dv_base", "hiqual_dv_fact_base", "race_base", "sf12mcs_dv_base",
-    "sf12mcs_dv_0", "age_dv_0", "gor_dv_fact_0",
-    "pcs_lagged_0", "econ_dist_bin_0", "econ_dist_bin_lagged_0",
-    "dnc_lagged_0", "home_owner_lagged_0", "econ_benefits_lagged_0",
-    "mastat_lagged_0", "econ_emp_bin_fact_0", "log_income_0"
-  )
-  expect_true(all(expected_cols %in% names(wide_data)))
+  # exact names and order: ltmle reads the node order from the columns
+  expect_identical(names(wide_data), wide_cols_mcs)
+  expect_equal(attr(wide_data, "outcome_var"), "sf12mcs_dv_1")
+  expect_equal(attr(wide_data, "exposure_vars"), c("econ_dist_bin_0", "econ_dist_bin_1"))
+  # econ_dist_bin_lagged_1 is A0 itself: dropped, from the attribute too
+  expect_false("econ_dist_bin_lagged_1" %in% names(wide_data))
+  expect_false("econ_dist_bin_lagged_1" %in% attr(wide_data, "time_lagged"))
+  expect_true(all(c(confounders("MCS"), time_varying_confounders("MCS")) %in%
+                    names(wide_data)))
 })
 
-### make_counterfactual_method: methods gFormulaImpute() draws the synthetic block with.
-### Synthetic frame, so this runs without the raw .dta files.
+### make_counterfactual_method: the methods gFormulaImpute() draws the
+### synthetic block with. Synthetic frame: no raw .dta needed.
 test_that("make_counterfactual_method covers every column and keeps factors categorical", {
   source(here::here("R", "helpers.R"))
 
@@ -90,8 +116,7 @@ test_that("make_counterfactual_method covers every column and keeps factors cate
   expect_error(make_counterfactual_method(bare), "exposure_vars")
 })
 
-### does run_mice not crash and generate mids object with expected variables
-#### also if new make_counterfactual_matrix works fine
+### run_mice and make_counterfactual_matrix on the real data
 test_that("run_mice produces expected output", {
   source(here::here("R", "build_data.R"))
   source(here::here("R", "run_mice.R"))
@@ -99,64 +124,66 @@ test_that("run_mice produces expected output", {
   source(here::here("R", "helpers.R"))
 
   pop_data  <- import_data(force = FALSE) |> clean_data() |> preproc_data()
-  wide_data <- build_data(pop_data)
+  wide_data <- build_data(pop_data, pre_wave = 1, base_wave = 2, start_wave = 3,
+                          final_wave = 4, outcome = "MCS")
 
-  # setting exposure
   wide_data <- set_exposure(wide_data, exposure = "econ_dist_bin")
-
-  # counterfactual predictor matrix
   predictor_matrix <- make_counterfactual_matrix(wide_data)
-  
-  # mini-mice call to check structure only
-  mids <- run_mice(wide_data, m = 2, maxit = 2, seed = 42)
 
-  # returns a proper mids object with the requested number of imputations
+  # mini-mice call to check structure only
+  mids <- run_mice(wide_data, m = 2, maxit = 2, seed = 42, outcome = "MCS")
+
   expect_s3_class(mids, "mids")
   expect_equal(mids$m, 2L)
 
-  # dianosing mice imputation, only check these results with at least 15 iterations
+  # mice diagnostics: only trust them with at least 15 iterations
   source(here::here("tests", "diagnose_mice.R"))
   diagnose_mice(mids, wide_data,
                 plot_dir = here::here("tests", "figs", "wide", "mice_diag"))
 
-  # mice ran without logged events (warnings or errors during imputation)
-  expect_null(mids$loggedEvents)
+  # no exposure/outcome interaction dropped. loggedEvents need not be empty:
+  # mice logs age_dv_1 (~ age_dv_0 + 1) as "collinear", which is harmless.
+  expect_true(assert_congenial_terms(mids, a_col = c("econ_dist_bin_0", "econ_dist_bin_1"),
+                                     y_col = "sf12mcs_dv_1"))
 
-  # does counterfactual matrix have regime row and column
   expect_true("regime" %in% rownames(predictor_matrix))
-  
-  # are all regime row values 1 except for the regime column
   off_diag <- predictor_matrix["regime", colnames(predictor_matrix) != "regime"]
   expect_true(all(off_diag == 1))
   expect_equal(unname(predictor_matrix["regime", "regime"]), 0)
 })
 
-### does fit_tmle_one not crash
-test_that("fit_tmle_one runs without error", {
+test_that("fit_ltmle_one runs on the real 2-wave data", {
   source(here::here("R", "build_data.R"))
   source(here::here("R", "run_mice.R"))
   source(here::here("R", "import_cleaning.R"))
   source(here::here("R", "helpers.R"))
   source(here::here("R", "sl_wrappers.R"))
   source(here::here("R", "confounders.R"))
-  source(here::here("R", "fit_tmle_one.R"))
+  source(here::here("R", "fit_ltmle_one.R"))
 
   pop_data  <- import_data(force = FALSE) |> clean_data() |> preproc_data()
-  wide_data <- build_data(pop_data, outcome = "MCS")
+  wide_data <- build_data(pop_data, pre_wave = 1, base_wave = 2, start_wave = 3,
+                          final_wave = 4, outcome = "MCS")
 
-  mids <- run_mice(wide_data, m = 2, maxit = 2, seed = 42)
+  mids <- run_mice(wide_data, m = 1, maxit = 1, seed = 42, outcome = "MCS")
 
-  tmle_fit <- fit_tmle_one(mids,
-                           imp_idx = 1,
-                           sl_libs = c("SL.mean", "SL.glm"),
-                           outcome = "MCS")
+  res <- fit_ltmle_one(mids,
+                       imp_idx       = 1,
+                       sl_libs       = c("SL.mean", "SL.glm"),
+                       outcome       = "MCS",
+                       regimes       = toy_regimes,
+                       sl_cv_control = toy_cv,
+                       gbound        = 0.001)
 
-  # fit_tmle_one calls tmle::tmle(), which returns a "tmle" object
-  expect_s3_class(tmle_fit, "tmle")
-  expect_true(is.numeric(tmle_fit$estimates$ATE$psi))
+  # a compact table, not the ltmleMSM fit: 4 regime means + 3 contrasts
+  expect_s3_class(res, "data.table")
+  expect_equal(nrow(res), 7L)
+  expect_named(res, c("imp", "estimand", "type", "estimate", "variance"))
+  expect_equal(res$estimand, ltmle_estimands)
+  expect_equal(res$type, rep(c("mean", "ate"), c(4, 3)))
+  expect_true(all(is.finite(res$estimate)))
+  expect_true(all(res$variance > 0))
 })
-
-## can i add an additional variable
 
 test_that("will a new variable exist after imputation", {
   source(here::here("R", "build_data.R"))
@@ -165,42 +192,35 @@ test_that("will a new variable exist after imputation", {
   source(here::here("R", "helpers.R"))
 
   pop_data  <- import_data(force = FALSE) |> clean_data() |> preproc_data()
-  wide_data <- build_data(pop_data)
+  wide_data <- build_data(pop_data, pre_wave = 1, base_wave = 2, start_wave = 3,
+                          final_wave = 4, outcome = "MCS")
 
-  # setting exposure
   wide_data <- set_exposure(wide_data, exposure = "econ_dist_bin")
-
-  # counterfactual predictor matrix
   predictor_matrix <- make_counterfactual_matrix(wide_data)
-  
-  # mini-mice call to check structure only
-  mids <- run_mice(wide_data, m = 2, maxit = 2, seed = 42)
 
-  # returns a proper mids object with the requested number of imputations
+  # mini-mice call to check structure only
+  mids <- run_mice(wide_data, m = 2, maxit = 2, seed = 42, outcome = "MCS")
+
   expect_s3_class(mids, "mids")
   expect_equal(mids$m, 2L)
 
-  # adding new var
   as_long_mids <- mice::complete(mids, action = "long", include = TRUE)
-  
-  as_long_mids <- as_long_mids |> mutate(new_var = paste0("var_", as.character(sex_dv_base)))
+
+  as_long_mids <- as_long_mids |> mutate(new_var = paste0("var_", as.character(sex_dv_fact_base)))
 
   imp_new <- mice::as.mids(as_long_mids)
-  
-  # mice ran without logged events (warnings or errors during imputation)
-  expect_null(mids$loggedEvents)
+  expect_true("new_var" %in% names(mice::complete(imp_new, 1)))
 
-  # does counterfactual matrix have regime row and column
+  # no exposure/outcome interaction dropped (a "collinear" age_dv_1 event is harmless)
+  expect_true(assert_congenial_terms(mids, a_col = c("econ_dist_bin_0", "econ_dist_bin_1"),
+                                     y_col = "sf12mcs_dv_1"))
+
   expect_true("regime" %in% rownames(predictor_matrix))
-  
-  # are all regime row values 1 except for the regime column
   off_diag <- predictor_matrix["regime", colnames(predictor_matrix) != "regime"]
   expect_true(all(off_diag == 1))
   expect_equal(unname(predictor_matrix["regime", "regime"]), 0)
 })
 
-
-## verifying how many strata will be for MAIHDA
 test_that("how many strata will be for MAIHDA", {
   source(here::here("R", "build_data.R"))
   source(here::here("R", "run_mice.R"))
@@ -208,51 +228,47 @@ test_that("how many strata will be for MAIHDA", {
   source(here::here("R", "helpers.R"))
 
   pop_data  <- import_data(force = FALSE) |> clean_data() |> preproc_data()
-  wide_data <- build_data(pop_data, pre_wave = 2, target_wave = 3, outcome = "MCS")
+  wide_data <- build_data(pop_data, pre_wave = 1, base_wave = 2, start_wave = 3,
+                          final_wave = 4, outcome = "MCS")
 
   # mini-mice call to check structure only
-  mids <- run_mice(wide_data, m = 5, maxit = 2, seed = 42)
+  mids <- run_mice(wide_data, m = 5, maxit = 2, seed = 42, outcome = "MCS")
 
-  # counterfactual predictor matrix
-  predictor_matrix <- make_counterfactual_matrix(wide_data)
-
-  # returns a proper mids object with the requested number of imputations
   expect_s3_class(mids, "mids")
 
-  # mice ran without logged events (warnings or errors during imputation)
-  expect_null(mids$loggedEvents)
+  # no exposure/outcome interaction dropped (a "collinear" age_dv_1 event is harmless)
+  expect_true(assert_congenial_terms(mids, a_col = c("econ_dist_bin_0", "econ_dist_bin_1"),
+                                     y_col = "sf12mcs_dv_1"))
 
-  # how many strata will be for MAIHDA in observed outcome data
-  ## creating strata_id per each imputed dataset
+  # strata id and label per imputed dataset
   fits <- purrr::map(seq_len(mids$m), function(i) {
-    dat_i <- mice::complete(mids, action = i) |>
+    mice::complete(mids, action = i) |>
       dplyr::mutate(
         # intersectional strata id: unique cell
-        strata_id = 100 * as.numeric(sex_dv_base) +
+        strata_id = 100 * as.numeric(sex_dv_fact_base) +
                      10 * as.numeric(race_base) +
                           as.numeric(hiqual_dv_fact_base),
         strata_id = as.factor(strata_id),
         # human-readable stratum name, e.g. "female:white:high"
-        strata_label = interaction(sex_dv_base, race_base, hiqual_dv_fact_base,
+        strata_label = interaction(sex_dv_fact_base, race_base, hiqual_dv_fact_base,
                                    sep = ":", drop = TRUE)
-      ) }
-    )
-  # counts per stratum (id + label) for each imputed dataset
+      )
+  })
+  # counts per stratum, per imputed dataset (not asserted)
   strata_tables <- purrr::map(fits, function(dat_i) {
     dplyr::count(dat_i, strata_id, strata_label)
   })
-
 })
 
 ## ---- DR-learner GATE arm (design 2026-07-30) --------------------------------
 
-### shared confounder set: byte-identical between fit_tmle_one and estimate_cate
-test_that("confounders returns the exact fit_tmle_one adjustment set", {
+### shared confounder set: byte-identical between fit_ltmle_one and estimate_cate
+test_that("confounders returns the exact ltmle baseline (W) set", {
   source(here::here("R", "confounders.R"))
 
   expect_identical(
     confounders("MCS"),
-    c("sex_dv_base",
+    c("sex_dv_fact_base",
       "hiqual_dv_fact_base",
       "race_base",
       "sf12mcs_dv_base",
@@ -273,6 +289,38 @@ test_that("confounders returns the exact fit_tmle_one adjustment set", {
   expect_identical(setdiff(confounders("MCS"), confounders("PCS")),
                    c("sf12mcs_dv_base", "pcs_lagged_0"))
   expect_error(confounders("XXX"))
+})
+
+### L1: the confounders measured between A0 and A1
+test_that("time_varying_confounders returns the exact ltmle L1 set", {
+  source(here::here("R", "confounders.R"))
+
+  expect_identical(
+    time_varying_confounders("MCS"),
+    c("age_dv_1",
+      "gor_dv_fact_1",
+      "pcs_lagged_1",
+      "dnc_lagged_1",
+      "home_owner_lagged_1",
+      "econ_benefits_lagged_1",
+      "mastat_lagged_1",
+      "econ_emp_bin_fact_1",
+      "log_income_1")
+  )
+  # PCS swaps only the other-scale lag; econ_dist_bin_lagged_1 (== A0) never enters
+  expect_identical(
+    time_varying_confounders("PCS"),
+    c("age_dv_1",
+      "gor_dv_fact_1",
+      "mcs_lagged_1",
+      "dnc_lagged_1",
+      "home_owner_lagged_1",
+      "econ_benefits_lagged_1",
+      "mastat_lagged_1",
+      "econ_emp_bin_fact_1",
+      "log_income_1")
+  )
+  expect_error(time_varying_confounders("XXX"))
 })
 
 ### make_strata: pure df -> df, same id arithmetic as the old strata_creation()
@@ -385,16 +433,14 @@ test_that("SuperLearner $Z is out-of-fold, input-row-ordered and nameless", {
   idx <- which(fit$libraryNames == "SL.glm_All")
   expect_length(idx, 1L)
 
-  # manual V-fold refit reproduces Z exactly, in input row order (the design's
-  # empirical verification of 3.6, kept as a regression test against
-  # SuperLearner version changes)
+  # manual V-fold refit reproduces Z exactly, in input row order (design 3.6's
+  # empirical check, kept as a regression test against SuperLearner changes)
   manual <- rep(NA_real_, n)
-  for (v in seq_along(fit$validRows)) {
-    rows <- fit$validRows[[v]]
+  manual[unlist(fit$validRows)] <- unlist(purrr::map(fit$validRows, \(rows) {
     gfit <- glm(y ~ ., data = data.frame(y = Yc[-rows], X[-rows, ]),
                 family = gaussian())
-    manual[rows] <- predict(gfit, newdata = X[rows, ], type = "response")
-  }
+    predict(gfit, newdata = X[rows, ], type = "response")
+  }))
   expect_equal(max(abs(manual - fit$Z[, idx])), 0, tolerance = 1e-8)
 
   # the hard-assertion wrapper: right length through, wrong length stops
@@ -438,8 +484,7 @@ test_that("sl_oof_predictions combines on the fit's own method scale", {
   expect_error(sl_oof_predictions(gm, n, "g"), "coefficient")
 })
 
-### toy generators for the DR-learner tests (used by the estimate_cate,
-### pool_cate and congenial run_mice tests; defined once, here only)
+### toy generators for the DR-learner tests (estimate_cate, pool_cate)
 # Synthetic wide frame shaped like the real one: all 14 columns of
 # confounders("MCS"), the exposure and the outcome. Balanced 12-cell design,
 # every A x S cell populated (deterministic 40% exposed per cell).
@@ -470,7 +515,7 @@ make_toy_wide_df <- function(n_per_cell = 100, tau_by_cell = rep(-2, 12), seed =
 
   # exposure: exactly 40% treated inside every cell (all 24 A x S cells filled)
   n_tr <- round(0.4 * n_per_cell)
-  a <- unlist(lapply(seq_len(12), function(j) {
+  a <- purrr::list_c(purrr::map(seq_len(12), \(j) {
     sample(rep(c(1L, 0L), c(n_tr, n_per_cell - n_tr)))
   }))
   df$econ_dist_bin_0 <- factor(a)
@@ -499,16 +544,132 @@ make_toy_wide_mids <- function(df, m = 2, seed = 7) {
   mice::mice(df_na, m = m, maxit = 1, seed = seed, printFlag = FALSE)
 }
 
-### design 7 "factor handling": estimate_cate runs on a small mids whose W
-### contains factors
-### Distinct per-cell tau (design review #1a): a same-constant-everywhere
-### tau_by_cell (e.g. the generator's own default rep(-2, 12)) can't tell a
-### correct sign from a flipped one, because mean(psi) == n_j-weighted mean
-### of the cell GATEs is a pure algebraic identity that holds for *any* psi,
-### negated included (mutation-tested by the design-2026-07-30 reviewer: a
-### negated-psi mutant and a mu0/mu1-arm-swap mutant both left every original
-### assertion here passing). Distinct, signed effects per cell plus an
-### explicit sign/recovery check against them close that gap.
+### toy generators for the two-time-point LTMLE tests (fit_ltmle_one,
+### run_mice formulas, make_counterfactual_matrix, toy pipeline)
+# Synthetic frame shaped like build_data()'s MCS output: the 27 wide_cols_mcs
+# columns with their types, plus the make_wide()/set_exposure() attributes.
+# 12 balanced S cells. A0 ~ W; L1 ~ A0 + W (only income and employment respond
+# to A0); A1 ~ A0 + L1; Y ~ W + L1 + A0 + A1. P(A0) ~ 0.28 and P(A1) ~ 0.23,
+# so all 48 A0 x A1 x S cells are populated (min 33 at 400 per cell).
+# attr(, "truth"): sample-average regime means E[Y(a0, a1)], with the
+# counterfactual L1 drawn from the same noise.
+make_toy_2wave_df <- function(n_per_cell = 400, seed = 1) {
+  set.seed(seed)
+  d <- data.table::as.data.table(expand.grid(
+    sex_dv_fact_base    = factor(c("Female", "Male")),
+    hiqual_dv_fact_base = factor(c("High", "Medium", "Low"), levels = c("High", "Medium", "Low")),
+    race_base           = factor(c("Non.white", "White")),
+    KEEP.OUT.ATTRS = FALSE
+  ))[rep(seq_len(12), each = n_per_cell)]
+  n    <- nrow(d)
+  lab  <- function(x, lv) factor(lv[x + 1L], levels = lv)   # 0/1 -> labelled factor
+  flip <- function(x, p) { i <- runif(n) < p; x[i] <- 1L - x[i]; x }
+  male <- d$sex_dv_fact_base == "Male"
+  low  <- d$hiqual_dv_fact_base == "Low"
+
+  base   <- 50 + 2 * male + rnorm(n, 0, 8)
+  age0   <- as.integer(round(runif(n, 20, 70)))
+  gor0   <- sample(c("London", "North.East", "Wales"), n, TRUE)
+  pcs0   <- 50 - 0.1 * (age0 - 45) + rnorm(n, 0, 8)
+  dist_l <- rbinom(n, 1, 0.25)
+  dnc0   <- sample(c("One", "Two.or.more", "Zero"), n, TRUE)
+  own0   <- rbinom(n, 1, 0.6)
+  ben0   <- rbinom(n, 1, 0.3)
+  mar0   <- rbinom(n, 1, 0.6)
+  emp0   <- rbinom(n, 1, 0.7)
+  inc0   <- 10 - 0.3 * ben0 + 0.3 * emp0 + rnorm(n, 0, 0.6)
+
+  a0 <- rbinom(n, 1, plogis(-1.4 + 1.2 * dist_l - 0.6 * (inc0 - 10) -
+                              0.02 * (pcs0 - 50) + 0.3 * ben0 - 0.3 * own0 +
+                              0.2 * (d$race_base == "Non.white") + 0.2 * low))
+
+  # L1 as functions of a0 so the truth can reuse the same noise
+  e_inc <- rnorm(n, 0, 0.3)
+  u_emp <- runif(n)
+  inc1  <- function(a) 3 + 0.7 * inc0 - 0.25 * a + e_inc
+  emp1  <- function(a) as.integer(u_emp < plogis(-1 + 2.5 * emp0 - 0.6 * a))
+  # the gap varies so mice does not log age_dv_1 as collinear (cor < .999)
+  age1  <- age0 + sample(0:3, n, TRUE)
+  gor1  <- ifelse(runif(n) < 0.03, sample(c("London", "North.East", "Wales"), n, TRUE), gor0)
+  pcs1  <- 20 + 0.6 * pcs0 + rnorm(n, 0, 5)
+  dnc1  <- ifelse(runif(n) < 0.1, sample(c("One", "Two.or.more", "Zero"), n, TRUE), dnc0)
+  ben1  <- flip(ben0, 0.1)
+
+  a1 <- rbinom(n, 1, plogis(-1.5 + 1.1 * a0 - 0.6 * (inc1(a0) - 10) -
+                              0.02 * (pcs1 - 50) - 0.4 * emp1(a0) + 0.3 * ben1))
+
+  # A0:A1 kept small: the glm Q-models and gFormulaMI's pmm are main-terms
+  # only. A0 and A1 effects far apart, so "before" and "now" means differ by ~4
+  # and a swapped c(A0, A1) order misses the truth.
+  mu_y <- function(a0, a1) {
+    50 + 0.3 * (base - 50) + 0.1 * (pcs1 - 50) + 1.5 * (inc1(a0) - 10) +
+      1 * emp1(a0) + 1 * male - 0.5 * low - 1.5 * a0 - 6 * a1 - 1 * a0 * a1
+  }
+
+  d[, `:=`(
+    sf12mcs_dv_base        = base,
+    age_dv_0               = age0,
+    gor_dv_fact_0          = factor(gor0),
+    pcs_lagged_0           = pcs0,
+    econ_dist_bin_0        = a0,
+    econ_dist_bin_lagged_0 = dist_l,
+    dnc_lagged_0           = factor(dnc0, levels = c("One", "Two.or.more", "Zero")),
+    home_owner_lagged_0    = lab(own0, c("Renter", "Owner")),
+    econ_benefits_lagged_0 = lab(1L - ben0, c("Benefits", "No.benefits")),
+    mastat_lagged_0        = lab(mar0, c("Not.partnered", "Partnered")),
+    econ_emp_bin_fact_0    = factor(emp0, levels = 0:1),
+    log_income_0           = inc0,
+    # start-wave outcome: an auxiliary only, it never feeds A1 or Y
+    sf12mcs_dv_0           = 48 + 0.4 * (base - 50) - 2 * a0 + rnorm(n, 0, 6),
+    age_dv_1               = age1,
+    gor_dv_fact_1          = factor(gor1),
+    pcs_lagged_1           = pcs1,
+    econ_dist_bin_1        = a1,
+    dnc_lagged_1           = factor(dnc1, levels = c("One", "Two.or.more", "Zero")),
+    home_owner_lagged_1    = lab(flip(own0, 0.05), c("Renter", "Owner")),
+    econ_benefits_lagged_1 = lab(1L - ben1, c("Benefits", "No.benefits")),
+    mastat_lagged_1        = lab(flip(mar0, 0.05), c("Not.partnered", "Partnered")),
+    econ_emp_bin_fact_1    = factor(emp1(a0), levels = 0:1),
+    log_income_1           = inc1(a0),
+    sf12mcs_dv_1           = mu_y(a0, a1) + rnorm(n, 0, 5)
+  )]
+  data.table::setcolorder(d, wide_cols_mcs)
+
+  lagged <- grep("lagged", wide_cols_mcs, value = TRUE)
+  purrr::iwalk(list(
+    n_tvars           = 11L,
+    n_base            = 4L,
+    baseline_vars     = wide_cols_mcs[1:4],
+    time_lagged       = lagged,
+    outcome_var       = "sf12mcs_dv_1",
+    outcome_baseline  = "sf12mcs_dv_base",
+    time_points       = 2L,
+    intermediate_vars = setdiff(wide_cols_mcs[-(1:4)], lagged),
+    exposure_vars     = c("econ_dist_bin_0", "econ_dist_bin_1"),
+    truth             = purrr::map_dbl(toy_regimes, \(r) mean(mu_y(r[1], r[2])))
+  ), \(v, k) data.table::setattr(d, k, v))
+  d
+}
+
+# Punch ~4% holes into both exposures, the outcome and a confounder, then
+# impute with the real run_mice() so the mids carries its congenial formulas.
+make_toy_2wave_mids <- function(df, m = 2, seed = 7) {
+  set.seed(seed)
+  df_na <- data.table::copy(df)
+  purrr::walk(c("econ_dist_bin_0", "econ_dist_bin_1", "sf12mcs_dv_1", "log_income_0"),
+              \(v) data.table::set(df_na, i = sample(nrow(df_na), round(0.04 * nrow(df_na))),
+                                   j = v, value = NA))
+  run_mice(df_na, m = m, maxit = 1, seed = seed, outcome = "MCS")
+}
+
+### design 7 "factor handling": W contains factors.
+### Distinct per-cell tau (design review #1a): a constant tau_by_cell (e.g. the
+### generator's default rep(-2, 12)) cannot tell a correct sign from a flipped
+### one, since mean(psi) == n_j-weighted mean of the cell GATEs is an algebraic
+### identity for *any* psi, negated included. Mutation-tested by the
+### design-2026-07-30 reviewer: a negated-psi mutant and a mu0/mu1 arm-swap
+### mutant both passed every original assertion. Distinct, signed per-cell
+### effects plus an explicit sign/recovery check close that gap.
 test_that("estimate_cate runs on a small mids with factor confounders", {
   source(here::here("R", "confounders.R"))
   source(here::here("R", "strata_creation.R"))
@@ -545,36 +706,30 @@ test_that("estimate_cate runs on a small mids with factor confounders", {
                tolerance = 1e-10)
 
   # sign and per-cell recovery: gate$estimate is Y(0)-Y(1), i.e. -tau_by_cell.
-  # A sign-flip mutant misses this by ~2x|tau| (>= 2 everywhere here);
-  # measured max error under the true code is 0.88 (no-imputation-noise floor
-  # ~0.36, through make_toy_wide_mids() ~0.70), so tolerance = 1.0 is safe
-  # margin without being vacuous.
+  # A sign-flip mutant misses by ~2x|tau| (>= 2 everywhere here). Measured max
+  # error under the true code: 0.88 (no-imputation-noise floor ~0.36, through
+  # make_toy_wide_mids() ~0.70), so tolerance = 1.0 is margin, not vacuous.
   expect_equal(res$gate$estimate, -tau_by_cell, tolerance = 1.0)
   # beta2_hte pins near +1 when the tau proxy tracks the true heterogeneity on
   # the conventional scale; it flips to about -1 under a sign error.
   expect_gt(res$blp$estimate[res$blp$term == "beta2_hte"], 0.5)
 })
 
-### design review #1b: make_toy_wide_df() randomizes A at a fixed 40% inside
-### every cell, so ghat is exactly recoverable and AIPW is then invariant to
-### which fitted model plays mu0's role vs mu1's role (a real, not
-### coincidental, consequence of double robustness when g is exactly
-### correctly specified -- confirmed algebraically and empirically: an
-### arm-swap mutant left the test above passing). Catching an arm swap needs
-### (i) A confounded by a continuous W the tiny SL.glm/SL.mean library can't
-### capture (so ghat is NOT exactly right) and (ii) a genuine W x A outcome
-### interaction (so mu0/mu1 are different functions of W, not a location
-### shift) -- otherwise the swap has nothing to bite on. This is a SEPARATE
-### generator, not a change to make_toy_wide_df(), which Tasks 6/12 rely on
-### unchanged.
-# A depends on age through a quadratic logit (b1*age_c + b2*age_c^2): a
-# linear-only learner (SL.glm) cannot recover this, so ghat is persistently
-# biased regardless of sample size. Y's treatment effect is linear in age
-# (tau0 + tau_age*(age-45)), a real W x A interaction SL.glm CAN represent for
-# mu0/mu1, isolating the arm-assignment bug as the swap's only source of
-# error. Calibrated empirically: swapping mu0_hat/mu1_hat inflates
-# mean(psi) by ~+0.9 to +1.1 against the truth, while the correctly-assigned
-# estimator recovers it within ~0.15.
+### design review #1b: make_toy_wide_df() randomizes A at a fixed 40% per
+### cell, so ghat is exact and AIPW is invariant to which fitted model plays
+### mu0 vs mu1: double robustness under an exactly correct g, not coincidence
+### (confirmed algebraically and empirically: an arm-swap mutant passed the
+### test above). Catching an arm swap needs (i) A confounded by a continuous W
+### the tiny SL.glm/SL.mean library cannot capture (ghat NOT exact) and (ii) a
+### genuine W x A outcome interaction (mu0/mu1 differ as functions of W, not
+### by a location shift); otherwise the swap has nothing to bite on. A
+### SEPARATE generator: make_toy_wide_df() stays unchanged for Tasks 6/12.
+# A ~ quadratic logit in age (b1*age_c + b2*age_c^2): linear-only SL.glm
+# cannot recover it, so ghat stays biased at any n. Y's treatment effect is
+# linear in age (tau0 + tau_age*(age-45)), a W x A interaction SL.glm CAN fit
+# for mu0/mu1, so the arm swap is the only error source. Calibrated
+# empirically: swapping mu0_hat/mu1_hat inflates mean(psi) by ~+0.9 to +1.1
+# over the truth; correctly assigned arms recover it within ~0.15.
 make_toy_confounded_df <- function(n_per_cell = 60, tau0 = -3, tau_age = -0.4,
                                     b1 = 2.0, b2 = -3.0, seed = 31) {
   set.seed(seed)
@@ -628,17 +783,15 @@ test_that("estimate_cate recovers the ATE under a confounded, W x A heterogeneou
   res <- estimate_cate(mids, imp_idx = 1, sl_libs = c("SL.mean", "SL.glm"),
                        outcome = "MCS")
 
-  # true population ATE on the Y(0)-Y(1) scale, averaged over this sample's
-  # realized ages (tau0/tau_age fully determine it; no per-cell truth here --
-  # age is drawn iid of strata, so all 12 cells share the same population
-  # truth up to sampling noise)
+  # true ATE on the Y(0)-Y(1) scale over this sample's realized ages
+  # (tau0/tau_age fully determine it). No per-cell truth: age is iid of
+  # strata, so all 12 cells share it up to sampling noise.
   truth <- -mean(tau0 + tau_age * (df$age_dv_0 - 45))
-  # expect_equal(..., tolerance=) on a *scalar* is a RELATIVE tolerance
-  # (all.equal.numeric semantics), not absolute -- confirmed empirically it
-  # would silently pass a mutant this test exists to catch. Assert the
-  # absolute gap directly instead: correctly-assigned arms recover the truth
-  # within ~0.05-0.15 at this n/seed; a mu0/mu1 arm swap inflates it by
-  # ~+1.0 (measured). 0.5 sits well inside that gap.
+  # expect_equal(tolerance =) on a *scalar* is RELATIVE (all.equal.numeric),
+  # not absolute: confirmed empirically it would silently pass the mutant this
+  # test exists to catch. So assert the absolute gap: correct arms land within
+  # ~0.05-0.15 at this n/seed; a mu0/mu1 arm swap adds ~+1.0 (measured). 0.5
+  # sits well inside that gap.
   expect_lt(abs(res$ate$estimate - truth), 0.5)
 })
 
@@ -654,7 +807,7 @@ test_that("pool_cate recovers injected cell-specific effects", {
   df   <- make_toy_wide_df(n_per_cell = 150, tau_by_cell = tau, seed = 21)
   mids <- make_toy_wide_mids(df, m = 2, seed = 21)
 
-  fits   <- lapply(1:2, function(i) {
+  fits   <- purrr::map(1:2, \(i) {
     estimate_cate(mids, imp_idx = i, sl_libs = c("SL.mean", "SL.glm"),
                   outcome = "MCS")
   })
@@ -731,11 +884,10 @@ test_that("sanitize_factor_levels honours skip and handles data.table without wa
   expect_equal(levels(dt$race_base), c("Non-white", "White"))
 })
 
-### review finding: a bare factor(new_labels[...]) with no `levels =` derives
-### its level set from observed rows only, so a defined-but-unused level
-### silently vanishes instead of being relabelled and kept -- breaking the
-### "levels replaced" contract. Guards the `levels = sort(unique(new_labels))`
-### fix.
+### review finding: factor(new_labels[...]) without `levels =` takes its levels
+### from observed rows only, so a defined-but-unused level silently vanishes
+### instead of being relabelled and kept, breaking the "levels replaced"
+### contract. Guards the `levels = sort(unique(new_labels))` fix.
 test_that("sanitize_factor_levels keeps a defined-but-unused level, relabelled", {
   source(here::here("R", "helpers.R"))
 
@@ -775,12 +927,12 @@ test_that("sanitize_factor_levels keeps full level sets on a zero-row frame", {
 ### ---- assert_congenial_terms ---------------------------------------------
 ### mids$loggedEvents$out is a *display* string, not a data structure:
 ### mice:::remove.lindep() collapses every predictor it drops for one
-### (it, im, dep) into a single comma-joined `out`. Anything checking it
-### programmatically has to re-parse it per term, and has to cope with the two
-### exits where remove.lindep names no term at all.
+### (it, im, dep) into a single comma-joined `out`. A programmatic check must
+### re-parse it per term and cope with the two exits where remove.lindep names
+### no term at all.
 
 # minimal one-row loggedEvents in mice's own column layout
-logged_event <- function(out, dep = "sf12mcs_dv_0", meth = "collinear") {
+logged_event <- function(out, dep = "sf12mcs_dv_1", meth = "collinear") {
   list(loggedEvents = data.frame(it = 1L, im = 1L, dep = dep, meth = meth,
                                  out = out, stringsAsFactors = FALSE))
 }
@@ -789,15 +941,15 @@ test_that("assert_congenial_terms requires both node names", {
   source(here::here("R", "run_mice.R"))
 
   # No defaults: a_col/y_col are always resolved by the caller, so a default
-  # exists only to be silently wrong on a wave whose suffix is not _0.
+  # exists only to be silently wrong on a window whose suffixes differ.
   expect_error(
-    assert_congenial_terms(logged_event("econ_dist_bin_01:race_baseNon.white"),
-                           a_col = "econ_dist_bin_0"),
+    assert_congenial_terms(logged_event("econ_dist_bin_0:race_baseWhite"),
+                           a_col = c("econ_dist_bin_0", "econ_dist_bin_1")),
     "y_col"
   )
   expect_error(
-    assert_congenial_terms(logged_event("econ_dist_bin_01:race_baseNon.white"),
-                           y_col = "sf12mcs_dv_0"),
+    assert_congenial_terms(logged_event("econ_dist_bin_0:race_baseWhite"),
+                           y_col = "sf12mcs_dv_1"),
     "a_col"
   )
 })
@@ -805,16 +957,36 @@ test_that("assert_congenial_terms requires both node names", {
 test_that("assert_congenial_terms stops when the Y model drops an A:S interaction", {
   source(here::here("R", "run_mice.R"))
 
+  A <- c("econ_dist_bin_0", "econ_dist_bin_1"); Y <- "sf12mcs_dv_1"
+
   err <- expect_error(
-    assert_congenial_terms(logged_event("econ_dist_bin_01:race_baseNon.white",
-                                        dep = "sf12mcs_dv_0"),
-                           a_col = "econ_dist_bin_0", y_col = "sf12mcs_dv_0"),
+    assert_congenial_terms(logged_event("econ_dist_bin_0:race_baseWhite"), A, Y),
     "congenial"
   )
   # the dropped term must appear in the message -- deciding rung 1 vs rung 2
   # needs to know *which* term went
-  expect_true(grepl("econ_dist_bin_01:race_baseNon.white",
+  expect_true(grepl("econ_dist_bin_0:race_baseWhite",
                     conditionMessage(err), fixed = TRUE))
+  expect_true(grepl("1 exposure-interaction term(s)",
+                    conditionMessage(err), fixed = TRUE))
+  # A1 is guarded as well as A0
+  expect_error(
+    assert_congenial_terms(logged_event("econ_dist_bin_1:sex_dv_fact_baseMale"), A, Y),
+    "congenial"
+  )
+})
+
+test_that("assert_congenial_terms stops when the Y model drops an A0:A1:S interaction", {
+  source(here::here("R", "run_mice.R"))
+
+  # the saturated A0 x A1 x S cells: the term names both exposures, yet it is
+  # one dropped term
+  err <- expect_error(
+    assert_congenial_terms(
+      logged_event("econ_dist_bin_0:econ_dist_bin_1:race_baseWhite"),
+      a_col = c("econ_dist_bin_0", "econ_dist_bin_1"), y_col = "sf12mcs_dv_1"),
+    "congenial"
+  )
   expect_true(grepl("1 exposure-interaction term(s)",
                     conditionMessage(err), fixed = TRUE))
 })
@@ -822,12 +994,14 @@ test_that("assert_congenial_terms stops when the Y model drops an A:S interactio
 test_that("assert_congenial_terms stops when the A model drops a Y:S interaction", {
   source(here::here("R", "run_mice.R"))
 
-  # run_mice puts y_col * S in the A model, so a break there is logged under the
-  # OUTCOME name with dep = the exposure. Matching only on a_col misses it.
+  # run_mice puts y * A_other * S in each A model, so a break there is logged
+  # under the OUTCOME name with dep = the exposure. Matching only on a_col
+  # misses it. y enters centred, so the label carries an I() wrapper.
   expect_error(
-    assert_congenial_terms(logged_event("sf12mcs_dv_0:sex_dv_baseMale",
+    assert_congenial_terms(logged_event("I(sf12mcs_dv_1 - 47.44):sex_dv_fact_baseMale",
                                         dep = "econ_dist_bin_0"),
-                           a_col = "econ_dist_bin_0", y_col = "sf12mcs_dv_0"),
+                           a_col = c("econ_dist_bin_0", "econ_dist_bin_1"),
+                           y_col = "sf12mcs_dv_1"),
     "congenial"
   )
 })
@@ -837,11 +1011,11 @@ test_that("assert_congenial_terms counts dropped terms, not logged rows", {
 
   err <- expect_error(
     assert_congenial_terms(
-      logged_event(paste("econ_dist_bin_01:sex_dv_baseMale",
-                         "econ_dist_bin_01:race_baseNon.white",
-                         "econ_dist_bin_01:hiqual_dv_fact_baseLow",
+      logged_event(paste("econ_dist_bin_0:sex_dv_fact_baseMale",
+                         "econ_dist_bin_0:race_baseWhite",
+                         "econ_dist_bin_0:hiqual_dv_fact_baseLow",
                          sep = ", ")),
-      a_col = "econ_dist_bin_0", y_col = "sf12mcs_dv_0"),
+      a_col = c("econ_dist_bin_0", "econ_dist_bin_1"), y_col = "sf12mcs_dv_1"),
     "congenial"
   )
   expect_true(grepl("3 exposure-interaction term(s)",
@@ -857,7 +1031,7 @@ test_that("assert_congenial_terms catches remove.lindep's unnamed wipeout", {
   expect_error(
     assert_congenial_terms(
       logged_event("All predictors are constant or have too high correlation."),
-      a_col = "econ_dist_bin_0", y_col = "sf12mcs_dv_0"),
+      a_col = c("econ_dist_bin_0", "econ_dist_bin_1"), y_col = "sf12mcs_dv_1"),
     "wipeout"
   )
 })
@@ -870,27 +1044,28 @@ test_that("assert_congenial_terms ignores a main-effect drop sharing a row with 
   # calls this an A-interaction drop and halts a run that is fine.
   expect_true(
     assert_congenial_terms(
-      logged_event("econ_dist_bin_0, sex_dv_baseMale:race_baseNon.white",
+      logged_event("econ_dist_bin_0, sex_dv_fact_baseMale:race_baseWhite",
                    dep = "log_income_0"),
-      a_col = "econ_dist_bin_0", y_col = "sf12mcs_dv_0")
+      a_col = c("econ_dist_bin_0", "econ_dist_bin_1"), y_col = "sf12mcs_dv_1")
   )
 })
 
 test_that("assert_congenial_terms matches on the node names it is given, not on wave 0", {
   source(here::here("R", "run_mice.R"))
 
-  # target_wave = 7 -> suffix _4. The guard must follow the names it is handed.
-  wave4 <- logged_event("econ_dist_bin_41:race_baseNon.white",
-                        dep = "sf12mcs_dv_4")
+  # Other suffixes, e.g. _3/_4. The guard must follow the names it is handed.
+  wave4 <- logged_event("econ_dist_bin_4:race_baseWhite", dep = "sf12mcs_dv_4")
   expect_error(
-    assert_congenial_terms(wave4, a_col = "econ_dist_bin_4", y_col = "sf12mcs_dv_4"),
+    assert_congenial_terms(wave4, a_col = c("econ_dist_bin_3", "econ_dist_bin_4"),
+                           y_col = "sf12mcs_dv_4"),
     "congenial"
   )
   # PCS resolves to a different outcome stem, same wave
   expect_error(
-    assert_congenial_terms(logged_event("sf12pcs_dv_4:sex_dv_baseMale",
+    assert_congenial_terms(logged_event("sf12pcs_dv_4:sex_dv_fact_baseMale",
                                         dep = "econ_dist_bin_4"),
-                           a_col = "econ_dist_bin_4", y_col = "sf12pcs_dv_4"),
+                           a_col = c("econ_dist_bin_3", "econ_dist_bin_4"),
+                           y_col = "sf12pcs_dv_4"),
     "congenial"
   )
 })
@@ -898,58 +1073,239 @@ test_that("assert_congenial_terms matches on the node names it is given, not on 
 test_that("assert_congenial_terms passes on clean or unrelated logged events", {
   source(here::here("R", "run_mice.R"))
 
-  A <- "econ_dist_bin_0"; Y <- "sf12mcs_dv_0"
+  A <- c("econ_dist_bin_0", "econ_dist_bin_1"); Y <- "sf12mcs_dv_1"
 
   expect_true(assert_congenial_terms(list(loggedEvents = NULL), A, Y))
   expect_true(assert_congenial_terms(
     logged_event("gor_dv_fact_0", dep = "log_income_0", meth = "pmm"), A, Y))
+  # the real-data setup event: age_dv_1 (~ age_dv_0 + 1) dropped as collinear
+  expect_true(assert_congenial_terms(logged_event("age_dv_1", dep = ""), A, Y))
   # a main-effect drop of the exposure itself is not an interaction drop
   expect_true(assert_congenial_terms(
     logged_event("econ_dist_bin_lagged_0", meth = "pmm"), A, Y))
   # ...and neither is a lagged-exposure interaction: econ_dist_bin_lagged_0 is a
-  # different node from the A node, even though it shares the stem
+  # different node from the A nodes, even though it shares the stem
   expect_true(assert_congenial_terms(
-    logged_event("econ_dist_bin_lagged_01:gor_dv_fact_0R2", meth = "pmm"), A, Y))
+    logged_event("econ_dist_bin_lagged_0:gor_dv_fact_0North.East", meth = "pmm"), A, Y))
 })
 
-### run_mice: formulas carry the saturated A x S interaction
+### run_mice: formulas carry the saturated A0 x A1 x S interaction
 test_that("run_mice builds Y and A formulas with the saturated strata interaction", {
-  source(here::here("R", "build_data.R"))
   source(here::here("R", "run_mice.R"))
-  source(here::here("R", "import_cleaning.R"))
-  source(here::here("R", "helpers.R"))
 
-  wide_data <- build_data(preproc_data(clean_data(import_data(force = TRUE))),
-                          outcome = "MCS")
-
-  # m = 1, maxit = 1: we are checking model structure, not convergence
-  mids <- run_mice(wide_data, m = 1, maxit = 1, seed = 42, outcome = "MCS")
+  # m = 1, maxit = 1: model structure, not convergence
+  mids <- make_toy_2wave_mids(make_toy_2wave_df(n_per_cell = 100), m = 1)
 
   expect_s3_class(mids, "mids")
 
-  y_terms <- attr(terms(mids$formulas[["sf12mcs_dv_0"]]), "term.labels")
-  a_terms <- attr(terms(mids$formulas[["econ_dist_bin_0"]]), "term.labels")
+  rhs_terms <- function(v) attr(terms(mids$formulas[[v]]), "term.labels")
 
   # Term-label variable ORDER in terms() follows each variable's main-effect
-  # position in the whole formula (set by make.formulas()'s column order), not
-  # the order written in the interaction expression passed to reformulate() --
-  # so "econ_dist_bin_0:sex_dv_base:race_base:hiqual_dv_fact_base" comes back
-  # as "sex_dv_base:hiqual_dv_fact_base:race_base:econ_dist_bin_0" on real
-  # data. Same interaction (model.matrix/mice do not care about label order),
-  # so match on the *set* of variables in a term rather than an exact string.
+  # position in the whole formula, not the order written in the interaction,
+  # and the A models' y enters centred, as "I(sf12mcs_dv_1 - 47.44)". So match
+  # on the *set* of variables in a term rather than an exact string.
   has_term <- function(term_labels, vars) {
-    any(vapply(strsplit(term_labels, ":", fixed = TRUE),
-               function(parts) setequal(parts, vars), logical(1)))
+    any(purrr::map_lgl(term_labels, \(tl) setequal(all.vars(str2lang(tl)), vars)))
   }
+  S <- c("sex_dv_fact_base", "race_base", "hiqual_dv_fact_base")
 
-  # Y model: the 4-way A x S term must be present
-  expect_true(has_term(y_terms, c("econ_dist_bin_0", "sex_dv_base", "race_base", "hiqual_dv_fact_base")))
-  # A model: saturated S, but no A term (A is the target there)
-  expect_true(has_term(a_terms, c("sex_dv_base", "race_base", "hiqual_dv_fact_base")))
-  expect_false(any(grepl("econ_dist_bin_0", a_terms, fixed = TRUE)))
+  # Y model: saturated A0 x A1 x S
+  expect_true(has_term(rhs_terms("sf12mcs_dv_1"), c("econ_dist_bin_0", "econ_dist_bin_1", S)))
+  # A models: y x A_other x S, and never the exposure being imputed
+  expect_true(has_term(rhs_terms("econ_dist_bin_0"), c("sf12mcs_dv_1", "econ_dist_bin_1", S)))
+  expect_true(has_term(rhs_terms("econ_dist_bin_1"), c("sf12mcs_dv_1", "econ_dist_bin_0", S)))
+  expect_false("econ_dist_bin_0" %in% all.vars(mids$formulas[["econ_dist_bin_0"]][[3]]))
+  expect_false("econ_dist_bin_1" %in% all.vars(mids$formulas[["econ_dist_bin_1"]][[3]]))
 })
 
-### does the MAIHDA layer recover the 2 x 2 x 3 design from the stratum labels
+### run_mice: methods_by_group is keyed without the _base suffix, so it must still reach S
+test_that("run_mice imputes sex, hiqual and race with their methods_by_group methods", {
+  source(here::here("R", "run_mice.R"))
+
+  S  <- c("sex_dv_fact_base", "hiqual_dv_fact_base", "race_base")
+  df <- make_toy_2wave_df(n_per_cell = 100)
+  # mice blanks the method of a complete column, so give each S column some NAs
+  set.seed(3)
+  purrr::walk(S, \(v) data.table::set(df, i = sample(nrow(df), 20L), j = v, value = NA))
+  mids <- make_toy_2wave_mids(df, m = 1)
+
+  expect_identical(unname(mids$method[S]), c("logreg", "polr", "logreg"))
+  expect_false(anyNA(mice::complete(mids, 1)[S]))
+})
+
+## ---- two-time-point LTMLE (toy data) -----------------------------------------
+
+### one saturated ltmleMSM call must reproduce one ltmle() call per regime
+test_that("fit_ltmle_one equals separate ltmle fits per regime", {
+  source(here::here("R", "run_mice.R"))
+  source(here::here("R", "sl_wrappers.R"))
+  source(here::here("R", "confounders.R"))
+  source(here::here("R", "fit_ltmle_one.R"))
+
+  mids <- make_toy_2wave_mids(make_toy_2wave_df(), m = 1)
+  # "glm" bypasses SuperLearner, so both sides are deterministic
+  r <- fit_ltmle_one(mids, 1, "glm", "MCS", toy_regimes, toy_cv, 0.001)
+
+  expect_s3_class(r, "data.table")
+  expect_named(r, c("imp", "estimand", "type", "estimate", "variance"))
+  expect_equal(r$estimand, ltmle_estimands)
+  expect_equal(r$type, rep(c("mean", "ate"), c(4, 3)))
+  expect_equal(r$imp, rep(1L, 7))
+
+  # the ltmle data the contract specifies: W, A0, L1, A1, Y in node order, A integer
+  A <- c("econ_dist_bin_0", "econ_dist_bin_1")
+  L <- time_varying_confounders("MCS")
+  d <- as.data.frame(mice::complete(mids, 1))[, c(confounders("MCS"), A[1], L, A[2], "sf12mcs_dv_1")]
+  d[A] <- purrr::map(d[A], \(a) as.integer(as.character(a)))
+  ltmle_sep <- function(abar) {
+    suppressMessages(ltmle::ltmle(d, Anodes = A, Lnodes = L, Ynodes = "sf12mcs_dv_1",
+                                  abar = abar, SL.library = "glm", gbounds = c(0.001, 1),
+                                  variance.method = "ic", estimate.time = FALSE))
+  }
+
+  purrr::iwalk(toy_regimes, \(abar, k) {
+    s <- summary(ltmle_sep(abar))$treatment
+    expect_equal(r$estimate[r$estimand == k], unname(s$estimate), tolerance = 1e-6)
+    expect_equal(sqrt(r$variance[r$estimand == k]), s$std.dev, tolerance = 1e-6)
+  })
+  # contrasts: ltmle(abar = list(treatment, control)), control = the reference
+  purrr::iwalk(toy_regimes[-1], \(abar, k) {
+    s   <- summary(ltmle_sep(list(abar, toy_regimes$never)))$effect.measures$ATE
+    lbl <- paste(k, "-", "never")
+    expect_equal(r$estimate[r$estimand == lbl], s$estimate, tolerance = 1e-6)
+    expect_equal(sqrt(r$variance[r$estimand == lbl]), s$std.dev, tolerance = 1e-6)
+  })
+})
+
+test_that("fit_ltmle_one refuses stacked imputations and an unnamed cv control", {
+  source(here::here("R", "run_mice.R"))
+  source(here::here("R", "sl_wrappers.R"))
+  source(here::here("R", "confounders.R"))
+  source(here::here("R", "fit_ltmle_one.R"))
+
+  mids <- make_toy_2wave_mids(make_toy_2wave_df(n_per_cell = 100), m = 2)
+
+  # complete(action = 1:2) would silently stack the imputations
+  expect_error(fit_ltmle_one(mids, 1:2, "glm", "MCS", toy_regimes, toy_cv, 0.001),
+               "imp_idx")
+  # ltmle checks only the names it is given, so SuperLearner would read an
+  # unnamed list by position
+  expect_error(fit_ltmle_one(mids, 1, "glm", "MCS", toy_regimes,
+                             list(5L, FALSE, TRUE, NULL), 0.001),
+               "sl_cv_control")
+})
+
+test_that("pool_ltmle applies Rubin's rules and refuses a bare table", {
+  source(here::here("R", "pool_ltmle.R"))
+
+  one_imp <- function(i, estimate, variance) {
+    data.table::data.table(imp = i, estimand = ltmle_estimands,
+                           type = rep(c("mean", "ate"), c(4, 3)),
+                           estimate = estimate, variance = variance)
+  }
+  tabs <- list(
+    one_imp(1L, c(51.2, 47.8, 47.3, 42.9, -3.4, -3.9, -8.3),
+            c(0.011, 0.039, 0.050, 0.063, 0.047, 0.057, 0.071)),
+    one_imp(2L, c(51.5, 47.4, 47.7, 42.6, -4.1, -3.8, -8.9),
+            c(0.012, 0.036, 0.054, 0.060, 0.044, 0.061, 0.075))
+  )
+  p <- pool_ltmle(tabs)
+
+  expect_named(p, c("estimand", "type", "effect", "se", "ll", "ul"))
+  expect_equal(p$estimand, ltmle_estimands)
+  expect_equal(p$type, rep(c("mean", "ate"), c(4, 3)))
+  purrr::walk(ltmle_estimands, \(k) {
+    rr <- mice::pool.scalar(Q = purrr::map_dbl(tabs, \(t) t$estimate[t$estimand == k]),
+                            U = purrr::map_dbl(tabs, \(t) t$variance[t$estimand == k]),
+                            n = Inf, k = 1)
+    expect_equal(p$effect[p$estimand == k], rr$qbar)
+    expect_equal(p$se[p$estimand == k], sqrt(rr$t))
+  })
+  expect_true(all(p$ll < p$effect & p$effect < p$ul))
+
+  # a bare table means the upstream target was not branched over imputations
+  expect_error(pool_ltmle(tabs[[1]]), "single")
+})
+
+test_that("make_counterfactual_matrix follows the DAG and the ltmle adjustment set", {
+  source(here::here("R", "helpers.R"))
+  source(here::here("R", "confounders.R"))
+
+  df    <- make_toy_2wave_df(n_per_cell = 10)
+  pm    <- make_counterfactual_matrix(df)
+  nodes <- c(wide_cols_mcs, "regime")
+  expect_equal(dimnames(pm), list(nodes, nodes))
+
+  # the g-formula outcome model adjusts for exactly the ltmle W, L1, A0 and A1
+  expect_setequal(colnames(pm)[pm["sf12mcs_dv_1", ] == 1],
+                  c(confounders("MCS"), time_varying_confounders("MCS"),
+                    "econ_dist_bin_0", "econ_dist_bin_1"))
+  # the start-wave outcome is not a confounder: no parents, and it predicts
+  # nothing (the regime row is all ones by construction)
+  expect_true(all(pm["sf12mcs_dv_0", ] == 0))
+  expect_true(all(pm[setdiff(nodes, "regime"), "sf12mcs_dv_0"] == 0))
+  # pcs_lagged_1 is measured with A0, so A0 does not cause it; final-wave income
+  # responds to A0 and to its own past
+  expect_equal(pm["pcs_lagged_1", "econ_dist_bin_0"], 0)
+  expect_equal(pm["log_income_1", "econ_dist_bin_0"], 1)
+  expect_equal(pm["log_income_1", "log_income_0"], 1)
+  # gFormulaImpute() draws in column order with maxit = 1, so every imputed
+  # node's parents must come earlier (strictly lower-triangular). Exposure rows
+  # are exempt: set by the regime, never imputed.
+  later <- upper.tri(pm, diag = TRUE)
+  later[nodes %in% attr(df, "exposure_vars"), ] <- FALSE
+  expect_true(all(pm[later] == 0))
+  expect_true(all(pm["regime", setdiff(nodes, "regime")] == 1))
+  expect_equal(pm["regime", "regime"], 0)
+})
+
+test_that("toy pipeline: mice -> ltmle -> pool -> gformula -> comparison", {
+  source(here::here("R", "helpers.R"))
+  source(here::here("R", "run_mice.R"))
+  source(here::here("R", "sl_wrappers.R"))
+  source(here::here("R", "confounders.R"))
+  source(here::here("R", "fit_ltmle_one.R"))
+  source(here::here("R", "pool_ltmle.R"))
+  source(here::here("R", "run_gformula.R"))
+  source(here::here("R", "assemble_comparison.R"))
+
+  df <- make_toy_2wave_df(n_per_cell = 150)
+  # gFormulaImpute() takes M = mids$m, and syntheticPool() stops on a
+  # non-positive total variance, which m = 2 hits often
+  mids <- make_toy_2wave_mids(df, m = 20)
+
+  ltmle_results <- purrr::map(1:2, \(i) {
+    fit_ltmle_one(mids, i, "glm", "MCS", toy_regimes, toy_cv, 0.001)
+  }) |> pool_ltmle()
+
+  # gFormulaImpute()'s mice drops age_dv_0 from the age_dv_1 model (cor > .99)
+  # and warns on every imputation; muffle only that warning
+  gformula <- function(estimand) withCallingHandlers(
+    run_gformula(mids, df, estimand, "MCS", toy_regimes),
+    warning = \(w) if (startsWith(conditionMessage(w), "Number of logged events"))
+      invokeRestart("muffleWarning")
+  )
+  set.seed(20261022)
+  mi_results     <- gformula("factor(regime) + 0")
+  mi_ate_results <- gformula("factor(regime)")
+
+  cmp <- assemble_comparison(ltmle_results, mi_results, mi_ate_results)
+
+  expect_named(cmp, c("marginal", "ate"))
+  expect_equal(cmp$marginal$intervention, names(toy_regimes))
+  expect_false(anyNA(cmp$marginal$tmle_effect))
+  expect_false(anyNA(cmp$marginal$mi_effect))
+  expect_equal(cmp$ate$estimand, c("before - never", "now - never", "permanent - never"))
+  expect_false(anyNA(cmp$ate$tmle_effect))
+  expect_false(anyNA(cmp$ate$mi_effect))
+
+  # both land near the DGP's regime means: the test is about wiring and labels
+  truth <- attr(df, "truth")[cmp$marginal$intervention]
+  expect_lt(max(abs(cmp$marginal$tmle_effect - truth)), 1.5)
+  expect_lt(max(abs(cmp$marginal$mi_effect - truth)), 2.5)
+})
+
+### MAIHDA layer: the 2 x 2 x 3 design from the stratum labels
 test_that(".gate_factors recovers the intersectional design from strata_label", {
   source(here::here("R", "fit_gate_meta.R"))
 
@@ -981,7 +1337,6 @@ test_that(".gate_factors recovers the intersectional design from strata_label", 
   expect_error(.gate_factors(short), "12")
 })
 
-### does fit_gate_meta return the documented shape, and does PCV behave
 test_that("fit_gate_meta returns documented tibbles and separates additive from interaction", {
   source(here::here("R", "rma_reml.R"))
   source(here::here("R", "fit_gate_meta.R"))
@@ -1006,10 +1361,9 @@ test_that("fit_gate_meta returns documented tibbles and separates additive from 
   add$estimate <- as.vector(X %*% c(2, -0.3, 2.0, -0.2, -0.6)) + rnorm(12, 0, 0.5)
   r_add <- fit_gate_meta(add)
 
-  # top-level structure: four named components
   expect_named(r_add, c("scalars", "coefs", "cells", "loco"))
 
-  # scalars: full column set in exact order (as constructed in fit_gate_meta)
+  # column sets in exact order, as fit_gate_meta builds them
   expect_equal(nrow(r_add$scalars), 1L)
   expect_named(r_add$scalars,
                c("imp", "tau2_null", "se_tau2_null", "tau2_main", "se_tau2_main",
@@ -1018,13 +1372,13 @@ test_that("fit_gate_meta returns documented tibbles and separates additive from 
                ignore.order = FALSE)
   expect_type(r_add$scalars$imp, "integer")
 
-  # coefs: full column set, 5 rows (intercept + 4 main effects)
+  # coefs: intercept + 4 main effects
   expect_equal(nrow(r_add$coefs), 5L)
   expect_named(r_add$coefs, c("imp", "term", "estimate", "se"),
                ignore.order = FALSE)
   expect_type(r_add$coefs$imp, "integer")
 
-  # cells: full column set, 12 rows (one per stratum)
+  # cells: one row per stratum
   expect_equal(nrow(r_add$cells), 12L)
   expect_named(r_add$cells,
                c("imp", "strata_id", "strata_label", "estimate", "se",
@@ -1034,7 +1388,7 @@ test_that("fit_gate_meta returns documented tibbles and separates additive from 
                ignore.order = FALSE)
   expect_type(r_add$cells$imp, "integer")
 
-  # loco: full column set, 12 rows (one per deleted cell)
+  # loco: one row per deleted cell
   expect_equal(nrow(r_add$loco), 12L)
   expect_named(r_add$loco,
                c("imp", "dropped_id", "dropped_label", "tau2_null_d",
@@ -1042,8 +1396,8 @@ test_that("fit_gate_meta returns documented tibbles and separates additive from 
                ignore.order = FALSE)
   expect_type(r_add$loco$imp, "integer")
 
-  # f0/f1 attribution: mu and QE_null must come from the null (intercept-only) model
-  # Fit independently to verify
+  # f0/f1 attribution: mu and QE_null must come from the null (intercept-only)
+  # model; refit it independently to check
   f0_chk <- rma_reml(add$estimate, add$se^2, model.matrix(~ 1, g), knha = TRUE)
   expect_equal(r_add$scalars$mu, f0_chk$beta[1])
   expect_equal(r_add$scalars$se_mu, f0_chk$se[1])
@@ -1052,7 +1406,6 @@ test_that("fit_gate_meta returns documented tibbles and separates additive from 
   # null model must leave more unexplained heterogeneity than additive model
   expect_gt(r_add$scalars$QE_null, r_add$scalars$QE_main)
 
-  # PCV is high in the additive case
   expect_gt(r_add$scalars$pcv, 0.9)
 
   # (b) inject a large INTERACTION into one cell -> PCV collapses.
@@ -1060,7 +1413,6 @@ test_that("fit_gate_meta returns documented tibbles and separates additive from 
   int <- add; int$estimate[9] <- int$estimate[9] - 6
   r_int <- fit_gate_meta(int)
 
-  # same interface checks on the interaction case
   expect_named(r_int$scalars,
                c("imp", "tau2_null", "se_tau2_null", "tau2_main", "se_tau2_main",
                  "pcv", "I2_null", "I2_main", "vt_null", "vt_main", "mu", "se_mu",
@@ -1069,7 +1421,6 @@ test_that("fit_gate_meta returns documented tibbles and separates additive from 
   expect_equal(nrow(r_int$loco), 12L)
   expect_type(r_int$loco$imp, "integer")
 
-  # interaction behavior: PCV collapses
   expect_lt(r_int$scalars$pcv, 0.5)
   expect_lt(r_int$scalars$pcv, r_add$scalars$pcv)
 
@@ -1078,7 +1429,7 @@ test_that("fit_gate_meta returns documented tibbles and separates additive from 
   expect_equal(worst, labs[9])
 })
 
-### does pool_gate_meta apply Rubin's rules in the documented shape
+### pool_gate_meta: Rubin's rules, documented shape
 test_that("pool_gate_meta pools across imputations and forms PCV from pooled tau2", {
   source(here::here("R", "rma_reml.R"))
   source(here::here("R", "fit_gate_meta.R"))
@@ -1097,19 +1448,18 @@ test_that("pool_gate_meta pools across imputations and forms PCV from pooled tau
     b$estimate <- as.vector(X %*% c(2, -0.3, 2.0, -0.2, -0.6)) + jitter
     b
   }
-  # Jitter sd 0.8 (> the cell SE of 0.4) keeps every full-model tau2 strictly
-  # interior (n_tau2_zero == 0), so this fixture isolates Rubin pooling from
-  # the full-model boundary case (tested separately below). Under this seed
-  # one of the 72 leave-one-cell-out refits still lands on the tau2 = 0
-  # boundary -- exactly the LOCO-layer pattern Fix 1a added counting for, and
-  # the same pattern seen in the real data (LOCO clips the boundary while the
+  # Jitter sd 0.8 (> cell SE 0.4) keeps every full-model tau2 strictly interior
+  # (n_tau2_zero == 0), isolating Rubin pooling from the full-model boundary
+  # case (tested below). Under this seed one of the 72 leave-one-cell-out
+  # refits still lands on tau2 = 0: the LOCO-layer pattern Fix 1a added
+  # counting for, also seen in the real data (LOCO clips the boundary, the
   # full-model fits stay interior). The LOCO block pools arithmetically (see
-  # pool_gate_meta.R) so this does not affect the assertions below; the
-  # resulting warning is suppressed here and covered by the next test.
+  # pool_gate_meta.R), so the assertions below are unaffected; the warning is
+  # suppressed here and covered by the next test.
   # Verified: pooled tau2_null 1.987, tau2_main 0.365, PCV 0.816, se_mu ratio
   # 1.135.
   set.seed(7)
-  one <- lapply(1:3, function(i) fit_gate_meta(mk(i, rnorm(12, 0, 0.8))))
+  one <- purrr::map(1:3, \(i) fit_gate_meta(mk(i, rnorm(12, 0, 0.8))))
 
   p <- suppressWarnings(pool_gate_meta(one))
 
@@ -1128,10 +1478,10 @@ test_that("pool_gate_meta pools across imputations and forms PCV from pooled tau
   expect_gte(p$scalars$tau2_null, 0)
   expect_gte(p$scalars$tau2_main, 0)
 
-  # Pinned values (Fix 3): promoted from a verified-but-unasserted comment so
-  # a regression in the back-transform (e.g. dropping "- eps", or writing
-  # se_tau2/tau2 instead of se_tau2/(tau2 + eps)) fails loudly instead of
-  # sliding through on finiteness/shape checks alone.
+  # Pinned values (Fix 3), promoted from the verified comment above: a
+  # back-transform regression (e.g. dropping "- eps", or se_tau2/tau2 instead
+  # of se_tau2/(tau2 + eps)) fails loudly instead of sliding through on
+  # finiteness/shape checks alone.
   expect_equal(p$scalars$tau2_null, 1.987, tolerance = 1e-3)
   expect_equal(p$scalars$tau2_main, 0.365, tolerance = 1e-3)
   expect_equal(p$scalars$pcv,       0.816, tolerance = 1e-3)
@@ -1149,7 +1499,7 @@ test_that("pool_gate_meta pools across imputations and forms PCV from pooled tau
   expect_true(all(p$cells$n_j_min <= p$cells$n_j_max))
 })
 
-### does pool_gate_meta warn when log-scale pooling can collapse tau2
+### log-scale pooling can collapse tau2: pool_gate_meta must warn
 test_that("pool_gate_meta warns when any imputation hits the tau2 = 0 boundary", {
   source(here::here("R", "rma_reml.R"))
   source(here::here("R", "fit_gate_meta.R"))
@@ -1170,12 +1520,12 @@ test_that("pool_gate_meta warns when any imputation hits the tau2 = 0 boundary",
     b
   }
   # sd well below the cell SE of 0.4 forces tau2_main to the zero boundary
-  one <- lapply(1:3, function(i) fit_gate_meta(mk(i, 0.05)))
+  one <- purrr::map(1:3, \(i) fit_gate_meta(mk(i, 0.05)))
   expect_gt(sum(purrr::map_dbl(one, ~ .x$scalars$tau2_main) == 0), 0)
 
   expect_warning(pool_gate_meta(one), "boundary")
 
-  # After warning fires, also verify the non-negativity invariant holds
+  # the non-negativity invariant still holds after the warning
   p <- suppressWarnings(pool_gate_meta(one))
   expect_gte(p$scalars$tau2_null, 0)
   expect_gte(p$scalars$tau2_main, 0)
@@ -1183,9 +1533,9 @@ test_that("pool_gate_meta warns when any imputation hits the tau2 = 0 boundary",
   expect_gte(p$scalars$tau2_main_ll, 0)
   expect_gt(p$n_tau2_zero, 0)
 
-  # Fix 4: this is structurally why Fix 1's defect (the LOCO layer was
-  # unguarded while only the full-model layer was counted) survived review --
-  # the boundary test asserted only on p$scalars. Assert on p$loco too.
+  # Fix 4: Fix 1's defect (LOCO layer unguarded, only the full-model layer
+  # counted) survived review because this test asserted only on p$scalars.
+  # Assert on p$loco too.
   expect_true("n_zero_d" %in% names(p$loco))
   expect_gt(p$n_tau2_zero_loco, 0)
   expect_true(any(p$loco$n_zero_d > 0))
