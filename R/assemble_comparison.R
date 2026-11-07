@@ -1,31 +1,22 @@
-assemble_comparison <- function(tmle_results, mi_results, mi_ate_results) {
-  tmle_marginal_means <- tmle_results |>
-    dplyr::rename(intervention = estimand) |>
-    dplyr::filter(type == "mean") |>
-    dplyr::rename_with(~ paste0("tmle_", .x), c("effect", "se", "ll", "ul")) |>
-    dplyr::select(!type)
+assemble_comparison <- function(ltmle_results, mi_results, mi_ate_results) {
+  ltmle_of_type <- function(want) {
+    ltmle_results |>
+      dplyr::filter(type == want) |>
+      dplyr::rename_with(~ paste0("tmle_", .x), c("effect", "se", "ll", "ul")) |>
+      dplyr::select(!type)
+  }
 
   comparison_marginal <- mi_results |>
-    dplyr::mutate(intervention = dplyr::case_when(intervention == 0 ~ "No distress",
-                                                  intervention == 1 ~ "Distress")) |>
     dplyr::relocate("intervention") |>
-    dplyr::left_join(tmle_marginal_means, by = "intervention")
+    dplyr::left_join(dplyr::rename(ltmle_of_type("mean"), intervention = estimand),
+                     by = "intervention")
 
-  tmle_ate_results <- tmle_results |>
-    dplyr::filter(estimand == "ATE") |>
-    dplyr::mutate(estimand = dplyr::recode_values(estimand, "ATE" ~ "Distress")) |>
-    dplyr::rename_with(~ paste0("tmle_", .x), c("effect", "se", "ll", "ul")) |>
-    dplyr::select(!type)
-
+  # contrast rows are labelled "k - ref"; this drops the reference-mean (intercept) row
   comparison_ate <- mi_ate_results |>
-    dplyr::filter(intervention == 1) |>
-    dplyr::mutate(intervention = dplyr::recode_values(intervention, 1 ~ "Distress")) |>
+    dplyr::filter(grepl(" - ", intervention, fixed = TRUE)) |>
     dplyr::rename(estimand = intervention) |>
     dplyr::relocate("estimand") |>
-    dplyr::left_join(tmle_ate_results, by = "estimand")
+    dplyr::left_join(ltmle_of_type("ate"), by = "estimand")
 
-  return(list(
-    marginal = comparison_marginal,
-    ate = comparison_ate
-  ))
+  list(marginal = comparison_marginal, ate = comparison_ate)
 }
