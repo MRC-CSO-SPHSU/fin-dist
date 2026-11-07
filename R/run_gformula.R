@@ -1,46 +1,42 @@
-# g-formula MI predictor matrix and imputation of counterfactual outcomes
-
-run_gformula <- function(wide_mids, wide_data_mi, estimand, outcome_scale, M = 50) {
-  estimand <- as.character(estimand)
-
-  regimes <- list(0,1)
-
+# g-formula by multiple imputation (gFormulaMI): impute synthetic data under each
+# regime, fit `outcome ~ estimand` in each dataset and pool with syntheticPool().
+run_gformula <- function(wide_mids, wide_data_mi, estimand, outcome_scale, regimes, M = 50) {
+  outcome <- attr(wide_data_mi, "outcome_var")
+  stopifnot(startsWith(outcome, c(MCS = "sf12mcs", PCS = "sf12pcs")[[outcome_scale]]))
   predictor_matrix <- make_counterfactual_matrix(wide_data_mi)
-
-  outcome_final <- if (outcome_scale == "MCS") "sf12mcs_dv_0" else "sf12pcs_dv_0"
-
   method <- make_counterfactual_method(wide_data_mi)
 
   imps <- gFormulaMI::gFormulaImpute(
     data             = wide_mids,
     M                = M,
-    trtVars          = c("econ_dist_bin_0"),
-    trtRegimes       = regimes,
+    trtVars          = attr(wide_data_mi, "exposure_vars"),
+    trtRegimes       = unname(regimes),
     predictorMatrix  = predictor_matrix,
     method           = method,
     silent           = TRUE
   )
-
-  fits <- imps %$%
-    lm(as.formula(paste(outcome_final, "~", estimand)))
-
+  fits    <- with(imps, lm(as.formula(paste(outcome, "~", estimand))))
   outvals <- gFormulaMI::syntheticPool(fits)
 
-  regimes_1 <- tibble::tibble(
-    intervention = regimes |>
-      purrr::reduce(c)
-  )
+  # gFormulaImpute codes regime k (list order) as factor level k: row
+  # "factor(regime)k" is regime k's mean, or with an intercept its contrast with
+  # regime 1, whose mean is then "(Intercept)"
+  rn <- rownames(outvals)
+  k  <- match(rn, paste0("factor(regime)", seq_along(regimes)))
+  k[rn == "(Intercept)"] <- 1L
+  stopifnot(!anyNA(k))
+  is_contrast  <- "(Intercept)" %in% rn & rn != "(Intercept)"
+  intervention <- ifelse(is_contrast,
+                         paste(names(regimes)[k], "-", names(regimes)[1]),
+                         names(regimes)[k])
 
-  out <- outvals |>
+  outvals |>
     tibble::as_tibble() |>
-    tibble::rownames_to_column("Intervention") |>
     dplyr::transmute(
       mi_effect = Estimate,
       mi_se     = sqrt(Total),
       mi_ll     = `95% CI L`,
-      mi_ul     = `95% CI U`
-    ) |>
-    dplyr::bind_cols(regimes_1)
-
-  return(out)
+      mi_ul     = `95% CI U`,
+      intervention = intervention
+    )
 }
