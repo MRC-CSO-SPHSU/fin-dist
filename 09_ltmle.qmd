@@ -1,0 +1,137 @@
+---
+title: "LTMLE main report"
+subtitle: "Effect of transitioning between two waves into health outcomes"
+author: "Darwin Del Castillo"
+format:
+  html:
+    number-sections: true
+toc: false
+
+editor: source
+---
+
+# Data
+Data comes from the UK Household Longitudinal Study (UKHLS), also known as Understanding Society. We use data from wave 15, which was collected from 2023 to 2025 as our analytical estimation sample of interest. Secondary analyses will include estimation in wave 3 (2011 -- 2013; closely after the 2008 economic shock) and wave 8 (2016 -- 2018; mid-point in the economic prosperity of the 2010s). This report focuses on the wave 3 analysis.
+
+```{r setup}
+#| output: false
+here::i_am("07_single_treatment.qmd")
+
+pacman::p_load(DiagrammeR,
+               tidyverse,
+               mice,
+               targets,
+               knitr,
+               ggplot2,
+               cowplot)
+
+# The targets store lives at the project root.
+tar_store <- here::here("_targets")
+
+# The pipeline estimates both SF-12 scales (tar_map over outcome = MCS / PCS).
+scales <- c("MCS", "PCS")
+
+source(here::here("R", "import_cleaning.R"))
+source(here::here("R", "helpers.R"))
+```
+
+# Model specification: One wave of data, time-invariant covariates + lagged confounders + baseline outcome + other confounders
+In this model, we include 1 wave of data (wave 3) and adjust for time-invariant covariates and lagged confounders (from wave 2). The model is specified as follows:
+
+**Notation**
+
+- TI~cov~: Time-invariant covariates:
+    - Sex (`sex_dv`)
+    - Ethnicity (`race_dv`)
+    - Highest educational qualification (`hiqual_dv`)
+- C~l~: lagged confounders from the previous round
+    - Number of dependents (`dnc`, 0, 1, 2+)
+    - Economic benefits receipt (`econ_benefits`, yes/no)
+    - Home ownership status (`home_owner`, yes/no)
+    - Marital status (`mastat_dv`, partnered vs not partnered)
+    - Lagged exposure: financial distress in the previous wave (`econ_dist_bin_lagged`, yes/no)
+    - Lagged values of both SF-12 components (`sf12mcs_dv_lagged` or `sf12pcs_dv_lagged`)
+- C~f~: Other confounders (not lagged)
+    - Region of residence (GOR) (`gor_dv`)
+    - Age (`age_dv`)
+- Job: Employment status (`econ_emp_bin`, employed vs not employed)
+- Inc: Income (`log_income`)
+- Y~0~: the SF-12 component summary at baseline — mental (`sf12mcs_dv_base`) or physical (`sf12pcs_dv_base`).
+
+
+```{r model1}
+#| echo: false
+#| include: true
+#| fig-cap: "Direct Acyclic Graph showing causal assumptions. Note: dashed lines represents unobserved confounders."
+#| fig-width: 10
+#| fig-height: 12
+#| fig-align: center
+#| out-width: 90%
+
+dag_dot <- "
+                  digraph{
+                  graph[rankdir=TB]
+
+                  node[fontname=Arial]
+                  TI [label=<<B><I>TI<SUB>cov</SUB></I></B>>]
+                  Cl [label=<<B><I>Con<SUB>l</SUB></I></B>>]
+                  J [label=<<B><I>Job</I></B>>]
+                  I [label=<<B><I>Inc</I></B>>]
+                  E [label=<<B><I>FD<SUB>t</SUB></I></B>>, 
+                      fontcolor=deepskyblue4, 
+                      color=deepskyblue4]
+                  E0 [label=<<B><I>FD<SUB>t-1</SUB></I></B>>]
+                  Y0 [label=<<B><I>SF12<SUB>b</SUB></I></B>>]
+                  Yi [label=<<B><I>SF12<SUB>t-1</SUB></I></B>>,
+                      style=dashed]
+                  Y1 [label=<<B><I>SF12<SUB>t</SUB></I></B>>,
+                      fontcolor=darkorange2, 
+                      color=darkorange2]
+
+                  E -> Y1
+                  TI -> E, Y1, Cl, Y0
+                  Cl -> E, Y1, J
+                  J -> I, E
+                  I -> E, Y1
+                  Y0 -> Yi, Cl, J
+                  Yi -> Y1
+                  E0 -> E, Yi, J
+
+                  {rank=min; TI}
+                  {rank=same; E, E0}
+                  {rank=same; Cl}
+                  {rank=same; J, I}
+                  {rank=max; Y0, Yi, Y1}
+            }
+                  "
+
+if (knitr::is_html_output()) {
+  DiagrammeR::grViz(dag_dot)
+} else {
+  # PDF and docx cannot embed the htmlwidget, so render the same DOT source to
+  # a file and include that: vector for LaTeX, raster for everything else.
+  ext <- if (knitr::is_latex_output()) "pdf" else "png"
+  dag_file <- here::here("outputs", "figs", "dag", paste0("dag_single_treatment.", ext))
+  dir.create(dirname(dag_file), recursive = TRUE, showWarnings = FALSE)
+
+  if (requireNamespace("DiagrammeRsvg", quietly = TRUE) &&
+      requireNamespace("rsvg", quietly = TRUE)) {
+    dag_svg <- charToRaw(DiagrammeRsvg::export_svg(DiagrammeR::grViz(dag_dot)))
+    if (ext == "pdf") {
+      rsvg::rsvg_pdf(dag_svg, dag_file)
+    } else {
+      rsvg::rsvg_png(dag_svg, dag_file, width = 2000)
+    }
+  } else if (nzchar(Sys.which("dot"))) {
+    # Fallback for environments without librsvg: the graphviz CLI reads the
+    # same DOT, HTML-like labels included.
+    dot_file <- tempfile(fileext = ".dot")
+    writeLines(dag_dot, dot_file)
+    system2("dot", c(paste0("-T", ext), shQuote(dot_file), "-o", shQuote(dag_file)))
+  } else {
+    stop("Rendering the DAG outside HTML needs DiagrammeRsvg + rsvg, or graphviz `dot` on PATH.")
+  }
+
+  knitr::include_graphics(dag_file)
+}
+```
