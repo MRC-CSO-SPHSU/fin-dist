@@ -1,4 +1,4 @@
-# Shared confounder set (W) for the marginal TMLE and the DR-learner GATE arm.
+# Baseline confounder set (W), shared by ltmle and the DR-learner GATE arm.
 
 confounders <- function(outcome = c("MCS", "PCS")) {
   outcome <- match.arg(outcome)
@@ -15,5 +15,14 @@ confounders <- function(outcome = c("MCS", "PCS")) {
     "econ_benefits_lagged_0",
     "mastat_lagged_0",
     "econ_emp_bin_fact_0",
-    "log_income_0")
+    "log_income_0",
+    "age_dv_1",
+    "gor_dv_fact_1",
+    if (outcome == "MCS") "pcs_lagged_1" else "mcs_lagged_1",
+    "dnc_lagged_1",
+    "home_owner_lagged_1",
+    "econ_benefits_lagged_1",
+    "mastat_lagged_1",
+    "econ_emp_bin_fact_1",
+    "log_income_1")
 }
