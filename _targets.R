@@ -81,6 +81,7 @@ seed_random <- 20261022
 gform_M <- 50
 cate_gbound <- 0.001 # non-aggressive, symmetric bounding
 tmle_bound <- 0.001 # non-aggressive symmetric bounding
+CVfolds <- 3L #sampling folds for learners
 
 ## Analytical samples for the whole pipeline and outcomes
 
@@ -122,7 +123,7 @@ map_pipe <- tar_map(
       sl_libs   = sl_libs,
       outcome   = outcome,
       gbound    = tmle_bound,
-      v = 3L
+      v = CVfolds
     ),
     pattern   = map(tmle_imp_idx), # one branch per imputation
     iteration = "list"             # collect the per-imputation tmle fits in a list
@@ -137,7 +138,7 @@ map_pipe <- tar_map(
                sl_libs   = sl_libs,
                outcome   = outcome,
                gbound    = 0.025,
-               v = 3L
+               v = CVfolds
              ),
              pattern   = map(tmle_imp_idx), # one branch per imputation
              iteration = "list"             # collect the per-imputation tmle fits in a list
@@ -179,7 +180,7 @@ map_pipe <- tar_map(
       sl_libs   = sl_libs,
       outcome   = outcome,
       gbound    = cate_gbound,
-      v = 3L
+      v = CVfolds
     ),
     pattern   = map(tmle_imp_idx), # one branch per imputation
     iteration = "list"             # collect the per-imputation results in a list
@@ -195,7 +196,7 @@ map_pipe <- tar_map(
       sl_libs   = sl_libs,
       outcome   = outcome,
       gbound    = 0.025,
-      v = 3L
+      v = CVfolds
     ),
     pattern   = map(tmle_imp_idx), # one branch per imputation
     iteration = "list"             # collect the per-imputation results in a list
