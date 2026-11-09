@@ -9,7 +9,7 @@ library(future.batchtools)
 library(future.callr)
 
 # ---- Sourcing functions (R/) ----
-for (f in c(list.files("R", "\\.R$", full.names = TRUE))) source(f); rm(f)
+purrr::walk(list.files("R", "\\.R$", full.names = TRUE), source)
 
 # Detect SLURM at runtime, if not in cluster, run locally with future.callr (in a separate r process)
 on_slurm <- nzchar(Sys.getenv("SLURM_JOB_ID")) && nzchar(Sys.which("sbatch"))
