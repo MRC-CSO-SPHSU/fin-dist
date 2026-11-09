@@ -408,7 +408,7 @@ The marginal TMLE above gives one population-average effect. This section asks *
 
 $$\Delta_j = E[\,Y^{a=1} - Y^{a=0} \mid S = j\,]$$
 
-$Y^{a=0}$ is the counterfactual SF-12 score had the person not been in financial distress and $Y^{a=1}$ the counterfactual outcome had they been in financial distress. For this, a DR-learner was fitted using the same machine learning libraries used for TMLE estimation. In the DR-learner, each person's (doubly robust) pseudo-outcome is built from out-of-fold predictions of separately fitted SuperLearner models for the outcome regression and the propensity score, then averaged within stratum by a regression on stratum indicators with heteroskedasticity-robust (HC2) standard errors, following **Cherzunikov et al. 2022**. Estimates are pooled across imputations with Rubin's rules.
+$Y^{a=0}$ is the counterfactual SF-12 score had the person not been in financial distress and $Y^{a=1}$ the counterfactual outcome had they been in financial distress. For this, a DR-learner was fitted using the same machine learning libraries used for TMLE estimation. In the DR-learner, each person's (doubly robust) pseudo-outcome is built from out-of-fold predictions of separately fitted SuperLearner models for the outcome regression and the propensity score, then averaged within stratum by a regression on stratum indicators with heteroskedasticity-robust (HC2) standard errors, following [**Chernozhukov et al. 2022**](https://causalml-book.org/chapters/CausalML_book_2022.pdf). Estimates are pooled across imputations with Rubin's rules.
 
 ## Effects by stratum
 
@@ -523,15 +523,16 @@ bind_rows(
 ```
 
 ## Caterpillar plot
-
+Exploring potential differences across intersectional groups. If we consider this analysis is not giving us any interesting insights, I can change it for a more traditional effect modification, in which $S$ is only a unidimensional vector. 
+$$\Delta_j = E[\,Y^{a=1} - Y^{a=0} \mid S = j\,]$$
 ```{r plot-cate-caterpillar}
 #| output: true
 #| include: true
 #| eval: true
 #| column: page
 #| fig-cap: "Stratum-specific average causal effect of financial distress on the SF-12 mental (MCS) and physical (PCS) component summaries (95% CI), by window (waves 3, 8 and 13). The estimates are represented in positive values, thus should be interpreted as points lost to distress. Strata are ordered by the wave 8 MCS effect. Dashed line represents that scale's and window's marginal TMLE average causal effect."
-#| fig-width: 15
-#| fig-height: 6
+#| fig-width: 20
+#| fig-height: 8
 
 # One stratum order for every window (sorted by the index window's MCS effect),
 # so the rows line up across the three panels.
@@ -543,30 +544,26 @@ strata_order <- unique(c(strata_order, setdiff(gate$strata_label, strata_order))
 
 ref_ate <- tmle_ate |> transmute(scale, wave, ref = -effect)
 
-cate_caterpillar <- plot_by_wave(
-  \(w) gate |>
-    filter(wave == w) |>
+cate_caterpillar <- gate |> 
     mutate(strata_label = factor(strata_label, levels = strata_order)) |>
     ggplot(aes(x = estimate, y = strata_label)) +
     theme_bw() +
     geom_vline(xintercept = 0, linetype = "dotted", colour = "grey60") +
-    geom_vline(data = filter(ref_ate, wave == w), aes(xintercept = ref),
+    geom_vline(data = ref_ate, aes(xintercept = ref),
                linetype = "dashed", colour = "grey30") +
     geom_pointrange(aes(xmin = ll, xmax = ul), size = 0.4) +
     labs(x = "SF-12 points lost to financial distress (95% CI)",
          y = NULL) +
-    scale_x_continuous(breaks = seq(-20, 20, 5)) +
-    facet_wrap(~scale, scales = "fixed") +
-    theme(panel.grid.minor = element_blank()),
-  xlim = range(0, gate$ll, gate$ul)
-)
+    scale_x_continuous(breaks = seq(-20, 20, 2)) +
+    coord_cartesian(xlim = range(0, gate$ll, gate$ul)) +
+    facet_grid(scale ~ wave, labeller = labeller(wave = waves_plot))
 
 print(cate_caterpillar)
 
 ggsave(
   filename = here::here("outputs", "figs", "cate_caterpillar.png"),
   plot     = cate_caterpillar,
-  width = 15, height = 6, dpi = 300
+  width = 15, height = 8, dpi = 300
 )
 ```
 
