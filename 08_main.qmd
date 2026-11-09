@@ -108,23 +108,8 @@ if (knitr::is_html_output()) {
   ext <- if (knitr::is_latex_output()) "pdf" else "png"
   dag_file <- here::here("outputs", "figs", "dag", paste0("dag_single_treatment.", ext))
   dir.create(dirname(dag_file), recursive = TRUE, showWarnings = FALSE)
-
-  if (requireNamespace("DiagrammeRsvg", quietly = TRUE) &&
-      requireNamespace("rsvg", quietly = TRUE)) {
-    dag_svg <- charToRaw(DiagrammeRsvg::export_svg(DiagrammeR::grViz(dag_dot)))
-    if (ext == "pdf") {
-      rsvg::rsvg_pdf(dag_svg, dag_file)
-    } else {
-      rsvg::rsvg_png(dag_svg, dag_file, width = 2000)
-    }
-  } else if (nzchar(Sys.which("dot"))) {
-    dot_file <- tempfile(fileext = ".dot")
-    writeLines(dag_dot, dot_file)
-    system2("dot", c(paste0("-T", ext), shQuote(dot_file), "-o", shQuote(dag_file)))
-  } else {
-    stop("Rendering the DAG outside HTML needs DiagrammeRsvg + rsvg, or graphviz `dot` on PATH.")
-  }
-
+  dag_svg <- charToRaw(DiagrammeRsvg::export_svg(DiagrammeR::grViz(dag_dot)))
+  if (ext == "pdf") rsvg::rsvg_pdf(dag_svg, dag_file) else rsvg::rsvg_png(dag_svg, dag_file, width = 2000)
   knitr::include_graphics(dag_file)
 }
 ```
@@ -366,7 +351,7 @@ ggsave(
 #| include: true
 #| eval: true
 #| column: page
-#| fig-cap: "Average treatment effect (ATE) of the SF-12 mental (MCS) and physical (PCS) component summaries under financial distress vs no distress (95% CI), by window (waves 3, 8 and 13). The first row corresponds to results from the TMLE model, whereas the second row corresponde to the g-formula model"
+#| fig-cap: "Average treatment effect (ATE) of the SF-12 mental (MCS) and physical (PCS) component summaries under financial distress vs no distress (95% CI), by window (waves 3, 8 and 13). The first row corresponds to results from the TMLE model and the second row corresponds to the g-formula model"
 #| fig-width: 14
 #| fig-height: 3.5
 
