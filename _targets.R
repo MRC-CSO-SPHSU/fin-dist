@@ -60,7 +60,12 @@ tar_option_set(
     "quarto"
   ),
   format = "rds",
-  seed   = 20261022
+  repository = "local",
+  storage = "worker",
+  retrieval = "worker",
+  seed   = 20261022,
+  # To avoid excess of calls to the cluster for unresolved workers from the controller.
+  backoff = tar_backoff(min = 10, max = 60, rate = 2)
 )
 
 # ---- Sourcing functions (R/) ----
