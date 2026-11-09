@@ -461,9 +461,14 @@ wald |>
 #    `max p`    = max(p),
     .by = c(scale, wave)
   ) |>
+  arrange(scale, wave) |>
+  mutate(wave       = sub("w", "Wave ", wave),
+         `median p` = format.pval(`median p`, digits = 3, eps = 0.001)) |>
   knitr::kable(
-    digits  = 3,
-    caption = "Omnibus Wald test of effect homogeneity across strata, by SF-12 scale. F statistic and p values are shown here as the average across imputed datasets."
+    digits    = 3,
+    col.names = c("Scale", "Wave", "F (median)", "df", "p (median)"),
+    align     = "llrrr",
+    caption   = "Omnibus Wald test of effect homogeneity across strata by SF-12 scale. F statistics and p values are medians across imputed datasets."
   )
 ```
 
