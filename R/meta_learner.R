@@ -60,7 +60,7 @@ sl_oof_predictions <- function(fit, n_expected, label) {
 # Pooled across imputations by pool_cate().
 
 estimate_cate <- function(wide_mids, imp_idx, sl_libs, outcome,
-                          gbound = CATE_EPS) {
+                          gbound = CATE_EPS, v = 5L) {
 
   imp_idx <- as.integer(imp_idx)
 
@@ -97,14 +97,14 @@ estimate_cate <- function(wide_mids, imp_idx, sl_libs, outcome,
 
   mu0 <- SuperLearner::SuperLearner(
     Y = Y[A == 0], X = Wmat[A == 0, , drop = FALSE], family = gaussian(),
-    SL.library = sl_libs, cvControl = list(V = 5))
+    SL.library = sl_libs, cvControl = list(V = v))
   mu1 <- SuperLearner::SuperLearner(
     Y = Y[A == 1], X = Wmat[A == 1, , drop = FALSE], family = gaussian(),
-    SL.library = sl_libs, cvControl = list(V = 5))
+    SL.library = sl_libs, cvControl = list(V = v))
   gm  <- SuperLearner::SuperLearner(
     Y = A, X = Wmat, family = binomial(),
     SL.library = sl_libs, method = "method.NNloglik",
-    cvControl = list(V = 5))
+    cvControl = list(V = v))
 
   ## -- 3.6 honest predictions without outer folds ----------------------------
 

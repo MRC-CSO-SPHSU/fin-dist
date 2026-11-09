@@ -121,7 +121,8 @@ map_pipe <- tar_map(
       imp_idx   = tmle_imp_idx,
       sl_libs   = sl_libs,
       outcome   = outcome,
-      gbound    = tmle_bound
+      gbound    = tmle_bound,
+      v = 3L
     ),
     pattern   = map(tmle_imp_idx), # one branch per imputation
     iteration = "list"             # collect the per-imputation tmle fits in a list
@@ -135,7 +136,8 @@ map_pipe <- tar_map(
                imp_idx   = tmle_imp_idx,
                sl_libs   = sl_libs,
                outcome   = outcome,
-               gbound    = 0.025
+               gbound    = 0.025,
+               v = 3L
              ),
              pattern   = map(tmle_imp_idx), # one branch per imputation
              iteration = "list"             # collect the per-imputation tmle fits in a list
@@ -176,7 +178,8 @@ map_pipe <- tar_map(
       imp_idx   = tmle_imp_idx,
       sl_libs   = sl_libs,
       outcome   = outcome,
-      gbound    = cate_gbound
+      gbound    = cate_gbound,
+      v = 3L
     ),
     pattern   = map(tmle_imp_idx), # one branch per imputation
     iteration = "list"             # collect the per-imputation results in a list
@@ -191,7 +194,8 @@ map_pipe <- tar_map(
       imp_idx   = tmle_imp_idx,
       sl_libs   = sl_libs,
       outcome   = outcome,
-      gbound    = 0.025
+      gbound    = 0.025,
+      v = 3L
     ),
     pattern   = map(tmle_imp_idx), # one branch per imputation
     iteration = "list"             # collect the per-imputation results in a list

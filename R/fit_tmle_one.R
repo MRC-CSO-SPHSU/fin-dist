@@ -1,5 +1,5 @@
 # Single-point TMLE (via the tmle package) for one imputed database.
-fit_tmle_one <- function(wide_mids, imp_idx, sl_libs, outcome, gbound = NULL) {
+fit_tmle_one <- function(wide_mids, imp_idx, sl_libs, outcome, gbound = NULL, v=5L) {
   # One imputation per call. mice::complete() accepts a vector for `action` and
   # silently returns the imputations *stacked*, so an unbranched target would
   # fit a single TMLE on m * n rows instead of erroring. Fail fast instead.
@@ -26,8 +26,8 @@ fit_tmle_one <- function(wide_mids, imp_idx, sl_libs, outcome, gbound = NULL) {
     Q.SL.library = sl_libs,
     g.SL.library = sl_libs,
     cvQinit      = TRUE,
-    V.Q          = 5,
-    V.g          = 5,
+    V.Q          = v,
+    V.g          = v,
     gbound       = gbound, 
     family       = "gaussian", # for continuous outcomes
     fluctuation = "logistic" # to bound the outcome to [0,1] for the logistic fluctuation step
