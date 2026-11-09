@@ -11,11 +11,21 @@ editor: source
 ---
 
 # Data
-Data comes from the UK Household Longitudinal Study (UKHLS), also known as Understanding Society. We use data from wave 15, which was collected from 2023 to 2025 as our analytical estimation sample of interest. Secondary analyses will include estimation in wave 3 (2011 -- 2013; closely after the 2008 economic shock) and wave 8 (2016 -- 2018; mid-point in the economic prosperity of the 2010s). This report focuses on the wave 3 analysis.
+Data comes from the UK Household Longitudinal Study (UKHLS), also known as Understanding Society. Each analytic sample is a window of two consecutive waves, with financial distress measured at both. The index window is waves 8 -- 9 (2016 -- 2019; mid-point in the economic prosperity of the 2010s). Secondary windows are waves 3 -- 4 (2011 -- 2014; closely after the 2008 economic shock) and waves 12 -- 13 (2020 -- 2023; COVID-19 pandemic and cost-of-living crisis).
+
+Each window draws on four waves:
+
+| Window | Baseline SF-12 (`pre_wave`) | Time-invariant covariates and first lags (`base_wave`) | First exposure, A~0~ (`start_wave`) | Second exposure and outcome, A~1~ and Y (`final_wave`) |
+|---|:-:|:-:|:-:|:-:|
+| Waves 3 -- 4 | 1 | 2 | 3 | 4 |
+| Waves 8 -- 9 | 6 | 7 | 8 | 9 |
+| Waves 12 -- 13 | 10 | 11 | 12 | 13 |
+
+The sample keeps people who responded at both `start_wave` and `final_wave` and have a baseline SF-12 on the outcome's scale.
 
 ```{r setup}
 #| output: false
-here::i_am("07_single_treatment.qmd")
+here::i_am("09_ltmle.qmd")
 
 pacman::p_load(DiagrammeR,
                tidyverse,
@@ -35,28 +45,43 @@ source(here::here("R", "import_cleaning.R"))
 source(here::here("R", "helpers.R"))
 ```
 
-# Model specification: One wave of data, time-invariant covariates + lagged confounders + baseline outcome + other confounders
-In this model, we include 1 wave of data (wave 3) and adjust for time-invariant covariates and lagged confounders (from wave 2). The model is specified as follows:
+# Model specification: two waves of exposure, time-invariant covariates + time-varying confounders + baseline outcome
+Within each window, we estimate the effect of financial distress at two consecutive waves (A~0~ at `start_wave`, A~1~ at `final_wave`) on SF-12 at `final_wave`. Confounders measured between the two exposures (L~1~) can be affected by A~0~ and also confound A~1~. Adjusting for them in a single outcome regression would block part of the effect of A~0~, so we use longitudinal TMLE (LTMLE), which handles this time-varying confounding. The data enter `ltmle` in the node order W → A~0~ → L~1~ → A~1~ → Y.
 
-**Notation**
+**Notation** (suffix `_0` = `start_wave`, `_1` = `final_wave`; t indexes the two time points)
 
-- TI~cov~: Time-invariant covariates:
-    - Sex (`sex_dv`)
-    - Ethnicity (`race_dv`)
-    - Highest educational qualification (`hiqual_dv`)
-- C~l~: lagged confounders from the previous round
-    - Number of dependents (`dnc`, 0, 1, 2+)
-    - Economic benefits receipt (`econ_benefits`, yes/no)
-    - Home ownership status (`home_owner`, yes/no)
-    - Marital status (`mastat_dv`, partnered vs not partnered)
-    - Lagged exposure: financial distress in the previous wave (`econ_dist_bin_lagged`, yes/no)
-    - Lagged values of both SF-12 components (`sf12mcs_dv_lagged` or `sf12pcs_dv_lagged`)
-- C~f~: Other confounders (not lagged)
-    - Region of residence (GOR) (`gor_dv`)
-    - Age (`age_dv`)
-- Job: Employment status (`econ_emp_bin`, employed vs not employed)
-- Inc: Income (`log_income`)
-- Y~0~: the SF-12 component summary at baseline — mental (`sf12mcs_dv_base`) or physical (`sf12pcs_dv_base`).
+- TI~cov~: time-invariant covariates, measured at `base_wave`:
+    - Sex (`sex_dv_fact_base`)
+    - Ethnicity (`race_base`)
+    - Highest educational qualification (`hiqual_dv_fact_base`)
+- Y~b~: SF-12 at `pre_wave`, on the outcome's scale: mental (`sf12mcs_dv_base`) or physical (`sf12pcs_dv_base`).
+- C~l,t~: lagged confounders, measured at the wave before t:
+    - Number of dependents (`dnc_lagged_t`, 0, 1, 2+)
+    - Economic benefits receipt (`econ_benefits_lagged_t`, yes/no)
+    - Home ownership status (`home_owner_lagged_t`, yes/no)
+    - Marital status (`mastat_lagged_t`, partnered vs not partnered)
+    - The other SF-12 component (`pcs_lagged_t` for MCS, `mcs_lagged_t` for PCS)
+    - Lagged exposure: financial distress at `base_wave` (`econ_dist_bin_lagged_0`, yes/no). At t = 1 this lag is A~0~ itself, so it is not repeated.
+- C~f,t~: other confounders at t (not lagged)
+    - Region of residence (GOR) (`gor_dv_fact_t`)
+    - Age (`age_dv_t`)
+- Job~t~: employment status (`econ_emp_bin_fact_t`, employed vs not employed)
+- Inc~t~: income (`log_income_t`)
+- A~t~: financial distress at t (`econ_dist_bin_0`, `econ_dist_bin_1`, yes/no)
+- Y: the SF-12 component summary at `final_wave`: mental (`sf12mcs_dv_1`) or physical (`sf12pcs_dv_1`).
+
+The `ltmle` node groups are W = {TI~cov~, Y~b~, C~l,0~, C~f,0~, Job~0~, Inc~0~} and L~1~ = {C~l,1~, C~f,1~, Job~1~, Inc~1~}.
+
+**Regimes.** Static interventions on (A~0~, A~1~), with `never` as the reference:
+
+| Regime | A~0~ | A~1~ | Meaning |
+|---|:-:|:-:|---|
+| `never` | 0 | 0 | No financial distress at either wave |
+| `before` | 1 | 0 | Distress at `start_wave` only (exit) |
+| `now` | 0 | 1 | Distress at `final_wave` only (entry) |
+| `permanent` | 1 | 1 | Distress at both waves |
+
+The estimands are each regime's counterfactual mean, $E[Y^{a_0, a_1}]$, and its contrast with `never`, $E[Y^{a_0, a_1}] - E[Y^{0, 0}]$.
 
 
 ```{r model1}
@@ -108,30 +133,432 @@ dag_dot <- "
 if (knitr::is_html_output()) {
   DiagrammeR::grViz(dag_dot)
 } else {
-  # PDF and docx cannot embed the htmlwidget, so render the same DOT source to
-  # a file and include that: vector for LaTeX, raster for everything else.
+  # PDF/docx cannot embed htmlwidgets: render DOT to a file (vector for LaTeX, PNG otherwise).
   ext <- if (knitr::is_latex_output()) "pdf" else "png"
-  dag_file <- here::here("outputs", "figs", "dag", paste0("dag_single_treatment.", ext))
+  dag_file <- here::here("outputs", "figs", "dag", paste0("dag_ltmle.", ext))
   dir.create(dirname(dag_file), recursive = TRUE, showWarnings = FALSE)
-
-  if (requireNamespace("DiagrammeRsvg", quietly = TRUE) &&
-      requireNamespace("rsvg", quietly = TRUE)) {
-    dag_svg <- charToRaw(DiagrammeRsvg::export_svg(DiagrammeR::grViz(dag_dot)))
-    if (ext == "pdf") {
-      rsvg::rsvg_pdf(dag_svg, dag_file)
-    } else {
-      rsvg::rsvg_png(dag_svg, dag_file, width = 2000)
-    }
-  } else if (nzchar(Sys.which("dot"))) {
-    # Fallback for environments without librsvg: the graphviz CLI reads the
-    # same DOT, HTML-like labels included.
-    dot_file <- tempfile(fileext = ".dot")
-    writeLines(dag_dot, dot_file)
-    system2("dot", c(paste0("-T", ext), shQuote(dot_file), "-o", shQuote(dag_file)))
-  } else {
-    stop("Rendering the DAG outside HTML needs DiagrammeRsvg + rsvg, or graphviz `dot` on PATH.")
-  }
-
+  dag_svg <- charToRaw(DiagrammeRsvg::export_svg(DiagrammeR::grViz(dag_dot)))
+  if (ext == "pdf") rsvg::rsvg_pdf(dag_svg, dag_file) else rsvg::rsvg_png(dag_svg, dag_file, width = 2000)
   knitr::include_graphics(dag_file)
 }
+```
+
+# Data preparation
+The report reads the cached results of the `targets` pipeline (`_targets.R` at the repo root). Each target exists once per window and SF-12 scale.
+
+```{r data_prep}
+#| output: false
+# Targets are named <target>_<window>_<scale>; tar_map() turns "w3-4" into "w3.4".
+window_labels <- c(w3.4 = "Waves 3–4", w8.9 = "Waves 8–9", w12.13 = "Waves 12–13")
+
+# Same names and order as ltmle_regimes in _targets.R; `never` is the reference.
+regimes   <- c("never", "before", "now", "permanent")
+contrasts <- paste(regimes[-1], "-", regimes[1])
+
+# One list element per window x scale, named "<scale>_<window>" for bind_scales().
+read_windows <- function(stem) {
+  ids <- tidyr::expand_grid(window = names(window_labels), scale = scales)
+  map2(ids$window, ids$scale,
+       \(w, s) tar_read_raw(paste(stem, w, s, sep = "_"), store = tar_store)) |>
+    setNames(paste(ids$scale, ids$window, sep = "_"))
+}
+
+ltmle_results       <- read_windows("ltmle_results")
+ltmle_sens1_results <- read_windows("ltmle_sens1_results")
+comparison          <- read_windows("comparison")
+cate_results        <- read_windows("cate_results")
+
+# Tables and plots match regimes by label, so stop if the pipeline's labels drift.
+stopifnot(all(map_lgl(ltmle_results, \(x) setequal(x$estimand, c(regimes, contrasts)))))
+
+# Stack a per-scale list into one tibble.
+bind_scales <- function(x, f = identity) {
+  dplyr::bind_rows(map(x, f), .id = "id") |>
+    tidyr::separate_wider_delim(id, delim = "_", names = c("scale", "wave")) |>
+    dplyr::mutate(scale = factor(scale, levels = scales),
+                  wave = factor(wave, levels = names(window_labels)))
+}
+```
+
+# Fit LTMLE
+We fit a two-time-point LTMLE with `ltmle::ltmleMSM()`. Its working marginal structural model is saturated (one indicator per regime). So the regime means equal those from separate `ltmle()` fits, but the exposure (g) models are fitted once and shared by all four regimes. The outcome (Q) and exposure models use a SuperLearner library: mean, GLM, degree-2 and degree-3 polynomials, GAM, neural network, random forest and XGBoost. The cumulative probability of following each regime is bounded below at 0.001. Standard errors come from the influence curve. `ltmle` works on an outcome rescaled to [0, 1], and the delta method carries the estimates and influence curves back to SF-12 points. Estimates are pooled across imputations with Rubin's rules.
+
+The table reports each regime's counterfactual mean (`mean`) and its contrast with `never` (`ate`), in points on the scale named in each row.
+
+```{r fit-ltmle}
+main_results <- bind_scales(ltmle_results)
+waves <- levels(main_results$wave)
+
+main_results |>
+  pivot_wider(names_from  = wave,
+              values_from = c(effect, se, ll, ul),
+              names_vary  = "slowest") |>
+  knitr::kable(
+    digits    = 3,
+    col.names = c("Scale", "Estimand", "Type",
+                  rep(c("Effect", "SE", "LL", "UL"), length(waves))),
+    caption   = "LTMLE estimates by SF-12 scale"
+  ) |>
+  kableExtra::add_header_above(c(" " = 3, setNames(rep(4, length(waves)), window_labels[waves])))
+```
+
+# Sensitivity analysis: g-formula with multiple imputation
+We fit a g-formula model with multiple imputation (`gFormulaMI`) under the same four regimes, with the same confounders and imputation model. The following tables compare the counterfactual means and the contrasts with `never` estimated with LTMLE and with g-formula MI.
+
+## Counterfactual means
+```{r fit-sensitivity}
+# One row per scale x window x method x regime, reused by the plot below.
+means_long <- bind_scales(comparison, \(x) x$marginal) |>
+  pivot_longer(
+    -c(wave, scale, intervention),
+    names_to = c("method", ".value"),
+    names_pattern = "(.*)_(.*)"
+  ) |>
+  mutate(method = factor(method,
+                         levels = c("tmle", "mi"),
+                         labels = c("LTMLE", "G-Formula MI")),
+         intervention = factor(intervention, levels = regimes))
+waves <- levels(means_long$wave)
+
+means_long |>
+  arrange(scale, method, intervention) |>
+  pivot_wider(names_from  = wave,
+              values_from = c(effect, se, ll, ul),
+              names_vary  = "slowest") |>
+  knitr::kable(
+    digits    = 3,
+    col.names = c("Scale", "Regime", "Method",
+                  rep(c("Effect", "SE", "LL", "UL"), length(waves))),
+    caption   = "Counterfactual mean SF-12 score under each regime: LTMLE vs g-formula MI, by SF-12 scale."
+  ) |>
+  kableExtra::add_header_above(c(" " = 3, setNames(rep(4, length(waves)), window_labels[waves])))
+```
+
+## Contrasts with `never`
+```{r fit-sensitivity-ate}
+# One row per scale x window x method x contrast, reused by the plot below.
+ate_long <- bind_scales(comparison, \(x) x$ate) |>
+  pivot_longer(
+    -c(wave, scale, estimand),
+    names_to = c("method", ".value"),
+    names_pattern = "(.*)_(.*)"
+  ) |>
+  mutate(method = factor(method,
+                         levels = c("tmle", "mi"),
+                         labels = c("LTMLE", "G-Formula MI")),
+         estimand = factor(estimand, levels = contrasts))
+waves <- levels(ate_long$wave)
+
+ate_long |>
+  arrange(scale, method, estimand) |>
+  pivot_wider(names_from  = wave,
+              values_from = c(effect, se, ll, ul),
+              names_vary  = "slowest") |>
+  knitr::kable(
+    digits    = 3,
+    col.names = c("Scale", "Contrast", "Method",
+                  rep(c("Effect", "SE", "LL", "UL"), length(waves))),
+    caption   = "Contrast of each regime with never: LTMLE vs g-formula MI, by SF-12 scale."
+  ) |>
+  kableExtra::add_header_above(c(" " = 3, setNames(rep(4, length(waves)), window_labels[waves])))
+```
+
+# Sensitivity 2: LTMLE with a stricter bound on g, to explore potential positivity violations
+We refit the LTMLE with the cumulative probability of each regime bounded below at 0.025 instead of 0.001.
+
+```{r fit-ltmle-gbound}
+sens1_results <- bind_scales(ltmle_sens1_results)
+waves <- levels(sens1_results$wave)
+
+sens1_results |>
+  pivot_wider(names_from  = wave,
+              values_from = c(effect, se, ll, ul),
+              names_vary  = "slowest") |>
+  knitr::kable(
+    digits    = 3,
+    col.names = c("Scale", "Estimand", "Type",
+                  rep(c("Effect", "SE", "LL", "UL"), length(waves))),
+    caption   = "LTMLE estimates by SF-12 scale, with the cumulative probability of each regime bounded below at 0.025."
+  ) |>
+  kableExtra::add_header_above(c(" " = 3, setNames(rep(4, length(waves)), window_labels[waves])))
+```
+
+```{r plot-helpers}
+#| include: false
+# One plot per window, in one row (waves 3–4, 8–9, 12–13). `build(w)` returns the
+# ggplot for window `w`; every panel gets the same x-range so the windows are
+# comparable. Legends are dropped because the y-axis already names each group.
+plot_by_wave <- function(build, xlim) {
+  plots <- imap(window_labels, \(title, w) build(w) +
+                  coord_cartesian(xlim = xlim) +
+                  labs(title = title) +
+                  theme(legend.position = "none"))
+  cowplot::plot_grid(plotlist = plots, nrow = 1, align = "h", axis = "tb")
+}
+```
+
+
+# Graphs
+## Counterfactual means
+Population mean SF-12 score under each regime, for both component summaries.
+```{r plot-ltmle-means}
+#| output: true
+#| include: true
+#| eval: true
+#| column: page
+#| fig-cap: "Counterfactual mean SF-12 mental (MCS) and physical (PCS) component summaries under each financial distress regime (95% CI), by window (waves 3–4, 8–9 and 12–13). The first row corresponds to results from the LTMLE model, whereas the second row corresponds to the g-formula model."
+#| fig-width: 14
+#| fig-height: 5
+
+results_comparison_marginal <- plot_by_wave(
+  \(w) means_long |>
+    filter(wave == w) |>
+    ggplot(aes(x = effect, y = intervention,
+               colour = intervention,
+               xmin = ll, xmax = ul)) +
+    theme_bw() +
+    geom_point(size = 2.5) +
+    geom_errorbar(orientation = "y", width = 0.3) +
+    scale_colour_brewer(palette = "Set1",
+                        name = "Regime",
+                        guide = "legend") +
+    labs(x = "Mean SF-12 score (95% CI)", y = NULL) +
+    facet_grid(method ~ scale, scales = "fixed") +
+    theme(panel.grid.minor = element_blank()),
+  xlim = range(means_long$ll, means_long$ul)
+)
+
+print(results_comparison_marginal)
+
+ggsave(
+  filename = here::here("outputs", "figs", "ltmle_comparison_means.png"),
+  plot     = results_comparison_marginal,
+  width = 14, height = 5, dpi = 300
+)
+```
+
+
+## Contrasts with `never`
+```{r plot-ltmle-ate}
+#| output: true
+#| include: true
+#| eval: true
+#| column: page
+#| fig-cap: "Contrast of each financial distress regime with never being distressed, for the SF-12 mental (MCS) and physical (PCS) component summaries (95% CI), by window (waves 3–4, 8–9 and 12–13). The first row corresponds to results from the LTMLE model, whereas the second row corresponds to the g-formula model."
+#| fig-width: 14
+#| fig-height: 4.5
+
+results_comparison_ate <- plot_by_wave(
+  \(w) ate_long |>
+    filter(wave == w) |>
+    ggplot(aes(x = effect, y = estimand,
+               colour = estimand,
+               xmin = ll, xmax = ul)) +
+    theme_bw() +
+    geom_vline(xintercept = 0, linetype = "dotted", colour = "grey60") +
+    geom_point(size = 2.5) +
+    geom_errorbar(orientation = "y", width = 0.3) +
+    scale_colour_brewer(palette = "Set1",
+                        name = "Contrast",
+                        guide = "legend") +
+    labs(x = "Causal mean difference in SF-12 score (95% CI)
+  (Reference: never distressed)", y = NULL) +
+    facet_grid(method ~ scale, scales = "fixed") +
+    theme(panel.grid.minor = element_blank()),
+  xlim = range(0, ate_long$ll, ate_long$ul)
+)
+
+print(results_comparison_ate)
+
+ggsave(
+  filename = here::here("outputs", "figs", "ltmle_comparison_ate.png"),
+  plot     = results_comparison_ate,
+  width = 14, height = 4.5, dpi = 300
+)
+```
+
+
+
+# Secondary analysis: effect measure modification by intersectional stratum (DR-learner)
+
+::: {.callout-note}
+Placeholder: the DR-learner has not been adapted to the two-wave regimes yet. It still estimates the effect of financial distress at `start_wave` (`econ_dist_bin_0`) on SF-12 at `start_wave` (`sf12mcs_dv_0` / `sf12pcs_dv_0`), so its estimates are not directly comparable with the LTMLE contrasts above.
+:::
+
+The marginal LTMLE above gives population-average effects. This section asks *for whom* the effect differs: additive-scale effect measure modification by intersectional social position. We estimate the *GATE* (group average treatment effect). The estimator consists in a **stratum-specific average causal effect** $\Delta_j$ for each of the 12 strata $j$ (sex × ethnicity × education):
+
+$$\Delta_j = E[\,Y^{a=1} - Y^{a=0} \mid S = j\,]$$
+
+$Y^{a=0}$ is the counterfactual SF-12 score had the person not been in financial distress and $Y^{a=1}$ the counterfactual outcome had they been in financial distress. Each person's doubly robust pseudo-outcome is built from out-of-fold predictions of separately fitted SuperLearner models for the outcome regression and the propensity score, then averaged within stratum by a regression on stratum indicators with heteroskedasticity-consistent (HC2; robust) standard errors. Estimates are pooled across imputations with Rubin's rules.
+
+## Effects by stratum
+
+```{r cate-table}
+#| output: true
+#| column: screen-inset
+gate <- bind_scales(cate_results, \(x) x$gate)
+waves <- levels(gate$wave)
+
+gate |>
+  select(scale, wave, strata_id, strata_label, estimate, ll, ul) |>
+  # names_sort orders the blocks by factor level (wave, then scale) so they line up with the spanners.
+  pivot_wider(names_from  = c(wave, scale),
+              values_from = c(estimate, ll, ul),
+              names_vary  = "slowest",
+              names_sort  = TRUE) |>
+  arrange(strata_id) |>
+  select(-strata_id) |>
+  knitr::kable(
+    digits    = 2,
+    col.names = c("Stratum (sex:race:education)",
+                  rep(c("Effect (Δ)", "LL", "UL"), length(waves) * length(scales))),
+    caption   = "Stratum-specific average causal effects by SF-12 scale, pooled across imputations with Rubin's rules"
+  ) |>
+  kableExtra::add_header_above(c(" " = 1, setNames(rep(3, length(waves) * length(scales)), rep(scales, length(waves))))) |>
+  kableExtra::add_header_above(c(" " = 1, setNames(rep(3 * length(scales), length(waves)), window_labels[waves])))
+```
+
+## Is the effect modification real?
+To asses this question, we included the Chernozhukov *best linear predictor* (BLP) coefficient $\beta_2$ (on the $Y^{a=1}-Y^{a=0}$ scale; $\beta_2 \neq 0$, which answer whether the between-stratum variation is systematic rather than sampling noise)
+
+```{r cate-heterogeneity}
+#| output: true
+blp <- bind_scales(cate_results, \(x) x$blp)
+waves <- levels(blp$wave)
+
+blp |>
+  pivot_wider(names_from  = wave,
+              values_from = c(estimate, se, ll, ul),
+              names_vary  = "slowest") |>
+  knitr::kable(
+    digits    = 3,
+    col.names = c("Scale", "Term",
+                  rep(c("Estimate", "SE", "LL", "UL"), length(waves))),
+    caption = "BLP test for effect modification by SF-12 scale, pooled across imputations (HC3 robust SEs within imputation). beta1_ate is the population-average effect on the conventional \\(Y^{a=1} - Y^{a=0}\\) scale. beta2_hte ≠ 0 is evidence that the 12 strata genuinely differ."
+  ) |>
+  kableExtra::add_header_above(c(" " = 2, setNames(rep(4, length(waves)), window_labels[waves])))
+```
+
+```{r wald-test}
+#| output: false
+#| include: false
+#| eval: true
+
+## The omnibus Wald test of homogeneity $\Delta_1 = \dots = \Delta_{12}$
+wald <- bind_scales(cate_results, \(x) x$wald)
+
+stopifnot(
+  "wald test df1 differs across imputations -- stratum count is not stable" =
+    all(dplyr::summarise(wald, k = dplyr::n_distinct(df1), .by = c(scale, wave))$k == 1)
+)
+
+wald |>
+  summarise(
+    `median F` = median(F),
+    df1        = first(df1),
+    `median p` = median(p),
+    `min p`    = min(p),
+    `max p`    = max(p),
+    .by = c(scale, wave)
+  ) |>
+  knitr::kable(
+    digits  = 3,
+    caption = "Omnibus Wald test of effect homogeneity across strata ($\\Delta_1 = \\dots = \\Delta_{12}$), by SF-12 scale. F statistics are not Rubin-pooled; the median and range across imputations are shown."
+  )
+```
+
+```{r cate-sanity}
+#| output: false
+#| include: false
+#| eval: true
+
+### Marginal mean of the DR score against the sign-flipped LTMLE contrasts (as a diagnostic check).
+
+# Each LTMLE contrast with `never` is sign-flipped onto the DR score's
+# Y^{a=0} - Y^{a=1} scale; ll/ul swap places under the flip.
+ltmle_ate <- bind_scales(ltmle_results) |> filter(type == "ate")
+dr_ate    <- bind_scales(cate_results, \(x) x$ate)
+
+bind_rows(
+  dr_ate |>
+    transmute(scale,
+              wave,
+              quantity = "Pooled mean(ψ) — DR score, $Y^{a=0} - Y^{a=1}$ scale",
+              estimate, ll, ul),
+  ltmle_ate |>
+    # The flipped bounds are computed in a separate mutate() on purpose:
+    # transmute() evaluates its arguments in order against a data mask that
+    # updates as it goes, so `ll = -ul, ul = -ll` in one call would read the
+    # already-overwritten `ll` and hand back the original `ul` unchanged.
+    mutate(flip_ll = -ul, flip_ul = -ll) |>
+    transmute(scale,
+              wave,
+              quantity = paste("−1 × LTMLE", estimand),
+              estimate = -effect, ll = flip_ll, ul = flip_ul)
+) |>
+  arrange(scale, wave) |>
+  knitr::kable(
+    digits  = 3,
+    caption = "Diagnostic check by SF-12 scale: the marginal mean of the DR score against each sign-flipped LTMLE contrast with never. Until the DR-learner is adapted to the two-wave regimes, the two target different estimands, so agreement is not expected yet."
+  )
+```
+
+## Caterpillar plot
+
+```{r plot-cate-caterpillar}
+#| output: true
+#| include: true
+#| eval: true
+#| column: page
+#| fig-cap: "Stratum-specific average causal effect of financial distress at the start wave on the SF-12 mental (MCS) and physical (PCS) component summaries at the start wave (95% CI), by window (waves 3–4, 8–9 and 12–13). The estimates are represented in positive values, thus should be interpreted as points lost to distress. Strata are ordered by the waves 8–9 MCS effect. Dashed lines are that scale's and window's marginal LTMLE contrasts with never, sign-flipped: red, before − never; blue, now − never; green, permanent − never."
+#| fig-width: 15
+#| fig-height: 6
+
+# One stratum order for every window (sorted by the index window's MCS effect),
+# so the rows line up across the three panels.
+strata_order <- gate |>
+  filter(scale == "MCS", wave == "w8.9") |>
+  arrange(estimate) |>
+  pull(strata_label)
+strata_order <- unique(c(strata_order, setdiff(gate$strata_label, strata_order)))
+
+ref_ate <- ltmle_ate |>
+  transmute(scale, wave, estimand = factor(estimand, levels = contrasts), ref = -effect)
+
+cate_caterpillar <- plot_by_wave(
+  \(w) gate |>
+    filter(wave == w) |>
+    mutate(strata_label = factor(strata_label, levels = strata_order)) |>
+    ggplot(aes(x = estimate, y = strata_label)) +
+    theme_bw() +
+    geom_vline(xintercept = 0, linetype = "dotted", colour = "grey60") +
+    geom_vline(data = filter(ref_ate, wave == w), aes(xintercept = ref, colour = estimand),
+               linetype = "dashed") +
+    geom_pointrange(aes(xmin = ll, xmax = ul), size = 0.4) +
+    # drop = FALSE keeps each contrast's colour fixed across panels, matching the contrast plot.
+    scale_colour_brewer(palette = "Set1", drop = FALSE) +
+    labs(x = "SF-12 points lost to financial distress (95% CI)",
+         y = NULL) +
+    facet_wrap(~scale, scales = "fixed") +
+    theme(panel.grid.minor = element_blank()),
+  xlim = range(0, gate$ll, gate$ul, ref_ate$ref)
+)
+
+print(cate_caterpillar)
+
+ggsave(
+  filename = here::here("outputs", "figs", "ltmle_cate_caterpillar.png"),
+  plot     = cate_caterpillar,
+  width = 15, height = 6, dpi = 300
+)
+```
+
+
+```{r cate-thinnest}
+#| output: false
+#| include: false
+#| eval: false
+thin <- gate |> dplyr::slice_min(n_j_min, n = 1, with_ties = FALSE)
+
+# Three cautions bound this section. First, congeniality between the imputation model and a between-stratum contrast is improved by the saturated $A \times S$ imputation terms but not exact — the exposure and outcome models used in the analysis are nonparametric in all of $W$. Second, the sparsest stratum (`r thin$scale`, n ≈ `r thin$n_j_min` at ~`r round(thin$pct_exposed)`% exposed) rests on roughly `r round(thin$n_j_min * thin$pct_exposed / 100)` exposed observations; its wide interval and its ĝ diagnostics keep that near-violation of positivity visible. Third, the 12 stratum-specific standard errors ignore the correlation across strata induced by the shared exposure and outcome model fits, as is conventional.
 ```
