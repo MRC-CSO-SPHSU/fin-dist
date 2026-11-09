@@ -16,7 +16,7 @@ on_slurm <- nzchar(Sys.getenv("SLURM_JOB_ID")) && nzchar(Sys.which("sbatch"))
 
 if (on_slurm) {
   future::plan(
-    future.batchtools::batchtools_slurm,
+    future.batchtools::batchtools_custom,
     cluster.functions = with_squeue_retry(
       future.batchtools::makeClusterFunctionsSlurm2(template = "slurm.tmpl")),
     workers   = 100L,
