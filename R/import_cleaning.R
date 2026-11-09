@@ -389,7 +389,6 @@ clean_data <- function(DT) {
   raw_data[, econ_benefits := factor(econ_benefits, levels = c(0L, 1L), labels = c("No benefits", "Benefits"))]
 
   # sex_dv: 0/1 gender_probe replaces the 1/2 coding; rows with missing sex (NA, -9, 0) dropped
-  raw_data <- raw_data[!is.na(gender_probe) & gender_probe <= 0]
   raw_data[, sex_dv := factor(gender_probe, levels = c(0, 1), labels = c("Female", "Male"))]
   raw_data <- raw_data[!is.na(gender_probe)]
 
@@ -479,7 +478,8 @@ preproc_data <- function(DT) {
   # ---- 4. Final columns ----
   final_cols <- c("pidp", "wave", "response", "race",
                   "sf12mcs_dv", "sf12pcs_dv", "log_income",
-                  "econ_emp_bin", "econ_emp_bin_fact", "econ_dist", "econ_dist_bin", "econ_dist_bin_fact", "econ_benefits",
+                  "econ_emp_bin", "econ_emp_bin_fact", "econ_dist", 
+                  "econ_dist_bin", "econ_dist_bin_fact", "econ_benefits",
                   "gor_dv", "mastat_dv", "home_owner", "dnc", "dnc_fact", "age_dv",
                   "sex_dv_fact", "hiqual_dv_fact", "gor_dv_fact")
 
