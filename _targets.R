@@ -8,18 +8,13 @@ library(future)
 library(future.batchtools)
 library(future.callr)
 
-# ---- Sourcing functions (R/) ----
-purrr::walk(list.files("R", "\\.R$", full.names = TRUE), source)
-
 # Detect SLURM at runtime, if not in cluster, run locally with future.callr (in a separate r process)
 on_slurm <- nzchar(Sys.getenv("SLURM_JOB_ID")) && nzchar(Sys.which("sbatch"))
 
 if (on_slurm) {
   future::plan(
-    future.batchtools::batchtools_custom,
-    cluster.functions = with_squeue_retry(
-      future.batchtools::makeClusterFunctionsSlurm2(template = "slurm.tmpl")),
-    workers   = 100L,
+    future.batchtools::batchtools_slurm,
+    template  = "slurm.tmpl",
     resources = list(
       ncpus    = 2,
       memory   = 24 * 1024,      # MB per CPU (= 24 GB per worker).
@@ -73,6 +68,9 @@ tar_option_set(
   # To avoid excess of calls to the cluster for unresolved workers from the controller.
   backoff = tar_backoff(min = 10, max = 60, rate = 2)
 )
+
+# ---- Sourcing functions (R/) ----
+purrr::walk(list.files("R", "\\.R$", full.names = TRUE), source)
 
 # --------------------- Configuration -------------------------
 ## mice configs
