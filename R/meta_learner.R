@@ -139,20 +139,6 @@ estimate_cate <- function(wide_mids, imp_idx, sl_libs, outcome,
                           df2 = lh$Res.Df[2],
                           p   = lh[2, "Pr(>F)"])
 
-  ## -- 3.9 BLP global heterogeneity test (conventional Y(1)-Y(0) scale) ------
-  m_hat <- g_hat * mu1_hat + (1 - g_hat) * mu0_hat  
-  tau   <- -proj$fitted.values                      # undo the 3.7 flip, once
-  blp_fit <- lm(I(Y - m_hat) ~ 0 + I(A - g_hat) +
-                  I((tau - mean(tau)) * (A - g_hat)))
-  blp_ct  <- lmtest::coeftest(blp_fit, vcov = sandwich::vcovHC, type = "HC3")
-  blp <- tibble::tibble(
-    imp      = imp_idx,
-    term     = c("beta1_ate", "beta2_hte"),
-    estimate = unname(blp_ct[, "Estimate"]),
-    se       = unname(blp_ct[, "Std. Error"]),
-    p        = unname(blp_ct[, "Pr(>|t|)"])
-  )
-
   ## -- 3.10 per-cell diagnostics ---------------------------------------------
   diag_tbl <- proj_df |>
     dplyr::mutate(A = A, g = g_hat) |>
@@ -185,13 +171,9 @@ estimate_cate <- function(wide_mids, imp_idx, sl_libs, outcome,
   }
 
   ## -- 3.11 output ------------------------------------------------------------
-  # Scale note: ate$estimate is mean(psi), the Y(0)-Y(1) scale;
-  # blp$estimate[blp$term == "beta1_ate"] is the same population ATE but on
-  # the conventional Y(1)-Y(0) scale. The two therefore always print with opposite signs. 
-  # This is by design, not a bug.
+  # Scale note: ate$estimate is mean(psi), the Y(0)-Y(1) scale
   list(
     gate = gate,
-    blp  = blp,
     ate  = tibble::tibble(imp      = imp_idx,
                           estimate = mean(psi),
                           se       = stats::sd(psi) / sqrt(n)),

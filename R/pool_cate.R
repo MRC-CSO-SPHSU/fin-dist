@@ -5,7 +5,6 @@ pool_cate <- function(cate_one) {
   m <- length(cate_one)
 
   gate_all <- purrr::map_dfr(cate_one, "gate")
-  blp_all  <- purrr::map_dfr(cate_one, "blp")
   ate_all  <- purrr::map_dfr(cate_one, "ate")
   wald_all <- purrr::map_dfr(cate_one, "wald")
 
@@ -37,12 +36,7 @@ pool_cate <- function(cate_one) {
     }) |>
     dplyr::ungroup()
 
-  blp <- blp_all |>
-    dplyr::group_by(term) |>
-    dplyr::group_modify(function(g, key) pool_pair(g$estimate, g$se^2)) |>
-    dplyr::ungroup()
-
   ate <- pool_pair(ate_all$estimate, ate_all$se^2)
 
-  list(gate = gate, blp = blp, ate = ate, wald = wald_all, m = m)
+  list(gate = gate, ate = ate, wald = wald_all, m = m)
 }
