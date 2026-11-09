@@ -5,6 +5,7 @@ author: "Darwin Del Castillo"
 format:
   html:
     number-sections: true
+    embed-resources: true
 toc: false
 
 editor: source
