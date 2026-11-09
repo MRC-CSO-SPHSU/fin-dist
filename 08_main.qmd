@@ -438,32 +438,13 @@ gate |>
 ```
 
 ## Is the effect modification real?
-To asses this question, we included the Chernozhukov et al. 2017 *best linear predictor* (BLP) coefficient $\beta_2$ (on the $Y^{a=1}-Y^{a=0}$ scale; $\beta_2 \neq 0$, which answer whether the between-stratum variation is systematic rather than sampling noise)
-
-```{r cate-heterogeneity}
-#| output: true
-blp <- bind_scales(cate_results, \(x) x$blp)
-waves <- levels(blp$wave)
-
-blp |>
-  pivot_wider(names_from  = wave,
-              values_from = c(estimate, se, ll, ul),
-              names_vary  = "slowest") |>
-  knitr::kable(
-    digits    = 3,
-    col.names = c("Scale", "Term",
-                  rep(c("Estimate", "SE", "LL", "UL"), length(waves))),
-    caption = "BLP test for effect modification by SF-12 scale, pooled across imputations (HC3 robust SEs within imputation). beta1_ate is the population-average effect on the conventional \\(Y^{a=1} - Y^{a=0}\\) scale and should sit near the TMLE average causal effect in magnitude. beta2_hte ≠ 0 is evidence that the 12 strata genuinely differ."
-  ) |>
-  kableExtra::add_header_above(c(" " = 2, setNames(rep(4, length(waves)), sub("w", "Wave ", waves))))
-```
+An omnibus Wald test of homogeneity was applied $\Delta_1 = \dots = \Delta_{12}$ 
 
 ```{r wald-test}
-#| output: false
-#| include: false
+#| output: true
+#| include: true
 #| eval: true
 
-## The omnibus Wald test of homogeneity $\Delta_1 = \dots = \Delta_{12}$ 
 wald <- bind_scales(cate_results, \(x) x$wald)
 
 stopifnot(
@@ -476,13 +457,13 @@ wald |>
     `median F` = median(F),
     df1        = first(df1),
     `median p` = median(p),
-    `min p`    = min(p),
-    `max p`    = max(p),
+#    `min p`    = min(p),
+#    `max p`    = max(p),
     .by = c(scale, wave)
   ) |>
   knitr::kable(
     digits  = 3,
-    caption = "Omnibus Wald test of effect homogeneity across strata ($\\Delta_1 = \\dots = \\Delta_{12}$), by SF-12 scale. F statistics are not Rubin-pooled; the median and range across imputations are shown."
+    caption = "Omnibus Wald test of effect homogeneity across strata, by SF-12 scale. F statistic and p values are shown here as the average across imputed datasets."
   )
 ```
 
