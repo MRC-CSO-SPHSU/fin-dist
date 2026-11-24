@@ -13,9 +13,6 @@ pacman::p_load(testthat,
   mice,
   lattice,
   SuperLearner,
-  estimatr,
-  car,
-  lmtest,
   sandwich,
   ltmle,
   gFormulaMI,
@@ -327,7 +324,7 @@ test_that("make_strata builds the 12-cell id and label", {
 
   set.seed(1)
   toy <- data.frame(
-    sex_dv_base         = factor(sample(c("Female", "Male"), 240, TRUE)),
+    sex_dv_fact_base    = factor(sample(c("Female", "Male"), 240, TRUE)),
     race_base           = factor(sample(c("Non.white", "White"), 240, TRUE)),
     hiqual_dv_fact_base = factor(sample(c("High", "Low", "Medium"), 240, TRUE)),
     other_col           = rnorm(240)
@@ -342,7 +339,7 @@ test_that("make_strata builds the 12-cell id and label", {
   expect_equal(nlevels(out$strata_id), 12L)
   # id arithmetic: 100*sex + 10*race + hiqual on the factor level indices
   expect_equal(as.character(out$strata_id),
-               as.character(100 * as.numeric(toy$sex_dv_base) +
+               as.character(100 * as.numeric(toy$sex_dv_fact_base) +
                              10 * as.numeric(toy$race_base) +
                                   as.numeric(toy$hiqual_dv_fact_base)))
   # row order and other columns untouched
@@ -353,66 +350,120 @@ test_that("make_strata builds the 12-cell id and label", {
 
 test_that("make_strata errors when a stratum column is absent", {
   source(here::here("R", "strata_creation.R"))
-  expect_error(make_strata(data.frame(sex_dv_base = factor("Female"))), "missing")
+  expect_error(make_strata(data.frame(sex_dv_fact_base = factor("Female"))), "missing")
 })
 
-### DR score primitives (design 3.6-3.7; 7: AIPW identity, sign, Z alignment)
-test_that("dr_pseudo_outcome: mean(psi) recovers the true ATE with known nuisances", {
+### Two-time-point DR-learner primitives
+# Closed-form two-time-point DGP: W -> A0 -> L1 -> A1 -> Y, L1 confounds A1.
+# Q2 = E[Y | W, A0, L1, A1], Q1 = E[Q2 | W, A0] and E[Y^a] are known exactly.
+make_toy_seq_truth <- function(n = 1e5, seed = 1) {
+  set.seed(seed)
+  W  <- rnorm(n)
+  A0 <- rbinom(n, 1, plogis(-0.5 + 0.8 * W))
+  L1 <- 0.5 * W - 0.7 * A0 + rnorm(n)
+  A1 <- rbinom(n, 1, plogis(-1 + 0.6 * L1 + 0.8 * A0))
+  Y  <- 50 + 2 * W + 1.5 * L1 - 2 * A0 - 4 * A1 + rnorm(n, 0, 2)
+  list(Y = Y, A0 = A0, A1 = A1,
+       Q2 = \(a0, a1) 50 + 2 * W + 1.5 * L1 - 2 * a0 - 4 * a1,
+       Q1 = \(a0, a1) 50 + 2.75 * W - 3.05 * a0 - 4 * a1,
+       g0 = \(a0) { p <- plogis(-0.5 + 0.8 * W); if (a0 == 1) p else 1 - p },
+       g1 = \(a0, a1) { p <- plogis(-1 + 0.6 * L1 + 0.8 * a0); if (a1 == 1) p else 1 - p },
+       truth = \(a0, a1) 50 - 3.05 * a0 - 4 * a1)
+}
+
+test_that("seq_dr_pseudo_outcome recovers E[Y^a] and is doubly robust", {
   source(here::here("R", "meta_learner.R"))
-
-  set.seed(101)
-  n   <- 20000
-  x   <- rnorm(n)
-  g   <- plogis(-0.5 + 0.8 * x)
-  A   <- rbinom(n, 1, g)
-  mu0 <- 50 + 3 * x
-  mu1 <- mu0 - 2                       # true conventional ATE = -2
-  Y   <- ifelse(A == 1, mu1, mu0) + rnorm(n, 0, 2)
-
-  psi <- dr_pseudo_outcome(A, Y, mu0, mu1, bound_propensity(g))
-
-  # psi is on the Y(0) - Y(1) scale, so the truth here is +2
-  expect_equal(mean(psi), 2, tolerance = 0.1)
+  d <- make_toy_seq_truth()
+  n <- length(d$Y)
+  res <- purrr::map(toy_regimes, \(r) {
+    r0  <- d$A0 == r[1]
+    r1  <- r0 & d$A1 == r[2]
+    pi0 <- d$g0(r[1])
+    pi1 <- pi0 * d$g1(r[1], r[2])
+    phi <- \(Q1, Q2, p0, p1) seq_dr_pseudo_outcome(r0, r1, d$Y, Q1, Q2, p0, p1)
+    est <- list(
+      both   = phi(d$Q1(r[1], r[2]), d$Q2(r[1], r[2]), pi0, pi1),
+      g_only = phi(rep(50, n), rep(50, n), pi0, pi1),
+      Q_only = phi(d$Q1(r[1], r[2]), d$Q2(r[1], r[2]), rep(0.5, n), rep(0.25, n)),
+      none   = phi(rep(50, n), rep(50, n), rep(0.5, n), rep(0.25, n))
+    )
+    purrr::map(est, \(p) c(err = mean(p) - d$truth(r[1], r[2]), se = sd(p) / sqrt(n)))
+  })
+  purrr::walk(res, \(b) purrr::walk(b[c("both", "g_only", "Q_only")],
+                                    \(x) expect_lt(abs(x[["err"]]), 4 * x[["se"]])))
+  # the checks bite: with both nuisances wrong some regime is far off
+  expect_gt(max(purrr::map_dbl(res, \(b) abs(b$none[["err"]]))), 0.5)
 })
 
-test_that("dr_pseudo_outcome: sign is Y(0) - Y(1), opposite to mu1 - mu0", {
+test_that("seq_dr_pseudo_outcome refuses NA, unbounded pi and r1 without r0", {
   source(here::here("R", "meta_learner.R"))
-
-  set.seed(102)
-  n   <- 500
-  g   <- rep(0.4, n)
-  A   <- rbinom(n, 1, g)
-  mu0 <- rnorm(n, 50, 5)
-  mu1 <- mu0 - 3
-  Y   <- ifelse(A == 1, mu1, mu0)      # zero residual: IPW terms vanish exactly
-
-  psi <- dr_pseudo_outcome(A, Y, mu0, mu1, g)
-
-  expect_equal(mean(psi), -(mean(mu1) - mean(mu0)), tolerance = 1e-12)
-  expect_true(sign(mean(psi)) == -sign(mean(mu1) - mean(mu0)))
+  ok <- list(r0 = c(1L, 0L), r1 = c(1L, 0L), Y = c(1, 2), Q1 = c(1, 1), Q2 = c(1, 1),
+             pi0 = c(0.5, 0.5), pi1 = c(0.5, 0.5))
+  call_with <- \(...) do.call(seq_dr_pseudo_outcome, utils::modifyList(ok, list(...)))
+  expect_length(call_with(), 2L)
+  expect_error(call_with(pi0 = c(NA, 0.5)), "NA")
+  expect_error(call_with(Q2 = c(1, NA)), "NA")
+  expect_error(call_with(pi1 = c(0, 0.5)), "bound_cum_g")
+  expect_error(call_with(pi0 = c(1.2, 0.5)), "bound_cum_g")
+  expect_error(call_with(r0 = c(0L, 0L)), "r1")
+  expect_error(call_with(Y = 1), "length")
 })
 
-test_that("dr_pseudo_outcome refuses unbounded propensities", {
+test_that("bound_cum_g bounds below only, like ltmle gbounds = c(eps, 1)", {
   source(here::here("R", "meta_learner.R"))
-  expect_error(
-    dr_pseudo_outcome(c(0L, 1L), c(1, 2), c(1, 1), c(1, 1), c(0, 0.5)),
-    "bound"
+  expect_equal(bound_cum_g(c(0, 0.0005, 0.5, 1), eps = 0.001), c(0.001, 0.001, 0.5, 1))
+  expect_equal(bound_cum_g(0), CATE_EPS)
+  # a near-zero cumulative g stays finite in the pseudo-outcome once bounded
+  phi <- seq_dr_pseudo_outcome(1L, 1L, 40, 50, 45,
+                               bound_cum_g(1e-8, 0.001), bound_cum_g(1e-12, 0.001))
+  expect_equal(phi, 50 + (45 - 50) / 0.001 + (40 - 45) / 0.001)
+})
+
+test_that("stratum_estimates gives cell means with var(IC)/n, the HC0 sandwich", {
+  source(here::here("R", "meta_learner.R"))
+  set.seed(5)
+  n <- 600
+  s <- sample(c("111", "112", "221"), n, TRUE, prob = c(0.6, 0.3, 0.1))
+  D <- cbind(never = rnorm(n, 50, 5), `now - never` = rnorm(n, -3, 8))
+  out <- stratum_estimates(D, s)
+
+  expect_named(out, c("strata_id", "estimand", "estimate", "variance"))
+  expect_equal(out$strata_id, rep(c("111", "112", "221"), each = 2))
+  expect_equal(out$estimand, rep(colnames(D), times = 3))
+  purrr::walk(seq_len(nrow(out)), \(i) {
+    j  <- s == out$strata_id[i]
+    d  <- D[, out$estimand[i]]
+    ic <- j * (d - mean(d[j])) / mean(j)
+    expect_equal(out$estimate[i], mean(d[j]))
+    expect_equal(out$variance[i], stats::var(ic) / n)
+    hc0 <- diag(sandwich::vcovHC(lm(d ~ 0 + factor(s)), type = "HC0"))
+    expect_equal(out$variance[i], unname(hc0[match(out$strata_id[i], sort(unique(s)))]) * n / (n - 1))
+  })
+  # one stratum holding everyone gives the whole-sample mean and var(D)/n
+  all1 <- stratum_estimates(D, rep("overall", n))
+  expect_equal(all1$estimate, unname(colMeans(D)))
+  expect_equal(all1$variance, unname(purrr::map_dbl(asplit(D, 2), stats::var)) / n)
+})
+
+test_that("cum_g_diagnostics summarises followers and leaves an empty cell NA without warning", {
+  source(here::here("R", "meta_learner.R"))
+  sid     <- c("111", "111", "111", "112", "112")
+  slab    <- c("F:W:H", "F:W:H", "F:W:H", "F:W:M", "F:W:M")
+  follow  <- c(TRUE, TRUE, FALSE, FALSE, FALSE)
+  pi1_raw <- c(0.0005, 0.2, 0.9, 0.3, 0.4)
+  expect_no_warning(
+    out <- cum_g_diagnostics(sid, slab, follow, bound_cum_g(pi1_raw, 0.001), pi1_raw, gbound = 0.001)
   )
-})
-
-### carried Task-4 finding: NA g_hat must fail diagnostically, not with R's
-### generic "missing value where TRUE/FALSE needed" from the bare comparison
-test_that("dr_pseudo_outcome refuses NA propensities with a diagnostic message", {
-  source(here::here("R", "meta_learner.R"))
-  expect_error(
-    dr_pseudo_outcome(c(0L, 1L), c(1, 2), c(1, 1), c(1, 1), c(NA, 0.5)),
-    "NA"
-  )
-})
-
-test_that("bound_propensity clamps to [0.025, 0.975]", {
-  source(here::here("R", "meta_learner.R"))
-  expect_equal(bound_propensity(c(0, 0.5, 1)), c(0.025, 0.5, 0.975))
+  expect_named(out, c("strata_id", "strata_label", "n_j", "n_follow", "pct_follow",
+                      "min_g", "median_g", "share_g_at_bound"))
+  expect_equal(out$strata_id, c("111", "112"))
+  expect_equal(out$strata_label, c("F:W:H", "F:W:M"))
+  expect_equal(out$n_j, c(3, 2))
+  expect_equal(out$n_follow, c(2, 0))
+  expect_equal(out$pct_follow, c(100 * 2 / 3, 0))
+  expect_equal(out$min_g, c(0.001, NA))
+  expect_equal(out$median_g, c(stats::median(c(0.001, 0.2)), NA))
+  expect_equal(out$share_g_at_bound, c(0.5, NA))
 })
 
 test_that("SuperLearner $Z is out-of-fold, input-row-ordered and nameless", {
@@ -482,68 +533,51 @@ test_that("sl_oof_predictions combines on the fit's own method scale", {
   expect_error(sl_oof_predictions(gm, n, "g"), "coefficient")
 })
 
-### toy generators for the DR-learner tests (estimate_cate, pool_cate)
-# Synthetic wide frame shaped like the real one: the 14 W columns (no _1 suffix)
-# of confounders("MCS"), the exposure and the outcome. Balanced 12-cell design,
-# every A x S cell populated (deterministic 40% exposed per cell).
-# tau_by_cell: length-12, the treatment effect (conventional Y(1) - Y(0)
-# scale) per stratum, indexed in strata_id order (ids sorted ascending).
-make_toy_wide_df <- function(n_per_cell = 100, tau_by_cell = rep(-2, 12), seed = 1) {
-  set.seed(seed)
-  grid <- expand.grid(
-    sex_dv_base         = factor(c("Female", "Male")),
-    race_base           = factor(c("Non.white", "White")),
-    hiqual_dv_fact_base = factor(c("High", "Low", "Medium")),
-    KEEP.OUT.ATTRS = FALSE
-  )
-  df <- grid[rep(seq_len(12), each = n_per_cell), ]
-  n  <- nrow(df)
+test_that("sl_honest_predict returns OOF on train rows and survives a learner that fails on the full fit", {
+  source(here::here("R", "meta_learner.R"))
 
-  df$sf12mcs_dv_base        <- rnorm(n, 50, 8)
-  df$age_dv_0               <- rnorm(n, 45, 10)
-  df$gor_dv_fact_0          <- factor(sample(c("London", "North.East", "Wales"), n, TRUE))
-  df$econ_dist_bin_lagged_0 <- factor(rbinom(n, 1, 0.2))
-  df$pcs_lagged_0           <- rnorm(n, 50, 8)
-  df$dnc_lagged_0           <- factor(sample(c("Zero", "One", "Two.plus"), n, TRUE))
-  df$home_owner_lagged_0    <- factor(rbinom(n, 1, 0.6))
-  df$econ_benefits_lagged_0 <- factor(rbinom(n, 1, 0.3))
-  df$mastat_lagged_0        <- factor(sample(c("Partnered", "Not.partnered"), n, TRUE))
-  df$econ_emp_bin_fact_0    <- factor(sample(c("Employed", "Not.employed"), n, TRUE))
-  df$log_income_0           <- rnorm(n, 10, 1)
+  set.seed(105)
+  n  <- 300
+  X  <- data.frame(x1 = rnorm(n), x2 = rnorm(n))
+  y  <- list(gaussian = 2 * X$x1 - X$x2 + rnorm(n),
+             binomial = rbinom(n, 1, plogis(1.2 * X$x1 - 0.8 * X$x2)))
+  fam   <- list(gaussian = stats::gaussian(), binomial = stats::binomial())
+  train <- rep(c(TRUE, FALSE), c(200, 100))
+  lib   <- c("SL.mean", "SL.glm")
 
-  # exposure: exactly 40% treated inside every cell (all 24 A x S cells filled)
-  n_tr <- round(0.4 * n_per_cell)
-  a <- purrr::list_c(purrr::map(seq_len(12), \(j) {
-    sample(rep(c(1L, 0L), c(n_tr, n_per_cell - n_tr)))
-  }))
-  df$econ_dist_bin_0 <- factor(a)
+  # train rows: out-of-fold; the rest: the full fit's ensemble prediction
+  purrr::walk(names(y), \(f) {
+    set.seed(11)
+    got <- sl_honest_predict(y[[f]], X, train, fam[[f]], lib, toy_cv, f)
+    set.seed(11)
+    fit <- SuperLearner::SuperLearner(
+      Y = y[[f]][train], X = X[train, , drop = FALSE], family = fam[[f]],
+      SL.library = lib, cvControl = toy_cv,
+      method = if (f == "binomial") "method.NNloglik" else "method.NNLS")
+    expect_equal(got[train], sl_oof_predictions(fit, sum(train), f), tolerance = 1e-12)
+    expect_equal(got[!train],
+                 as.numeric(predict(fit, newdata = X[!train, , drop = FALSE], onlySL = TRUE)$pred),
+                 tolerance = 1e-12)
+  })
 
-  # map each row's stratum to its rank in strata_id (= sorted 100s+10r+h) order
-  sid      <- 100 * as.numeric(df$sex_dv_base) +
-               10 * as.numeric(df$race_base) +
-                    as.numeric(df$hiqual_dv_fact_base)
-  sid_rank <- match(sid, sort(unique(sid)))
-
-  df$sf12mcs_dv_0 <- 0.5 * df$sf12mcs_dv_base +
-    2 * (df$sex_dv_base == "Female") +
-    tau_by_cell[sid_rank] * a +
-    rnorm(n, 0, 1)
-
-  rownames(df) <- NULL
-  df
-}
-
-# Punch a few holes and impute so estimate_cate sees a genuine mids object.
-make_toy_wide_mids <- function(df, m = 2, seed = 7) {
-  set.seed(seed)
-  df_na <- df
-  df_na$sf12mcs_dv_0[sample(nrow(df), round(0.05 * nrow(df)))] <- NA
-  df_na$log_income_0[sample(nrow(df), round(0.05 * nrow(df)))] <- NA
-  mice::mice(df_na, m = m, maxit = 1, seed = seed, printFlag = FALSE)
-}
+  # a learner that errors only on the full-size training set gets weight 0 and a
+  # NULL fitLibrary entry; predict() without onlySL would then error. Assigned
+  # into globalenv() as register_sl_wrappers() does.
+  assign("SL.failfull", function(Y, X, newX, family, ...) {
+    if (nrow(X) == sum(train)) stop("fails on the full fit")
+    SuperLearner::SL.mean(Y, X, newX, family, ...)
+  }, envir = globalenv())
+  withr::defer(rm("SL.failfull", envir = globalenv()))
+  got <- withCallingHandlers(
+    sl_honest_predict(y$gaussian, X, train, stats::gaussian(), c("SL.glm", "SL.failfull"),
+                      toy_cv, "failfull"),
+    warning = \(w) if (grepl("Error in algorithm|already 0 for all failed", conditionMessage(w))) invokeRestart("muffleWarning"))
+  expect_length(got, n)
+  expect_true(all(is.finite(got)))
+})
 
 ### toy generators for the two-time-point LTMLE tests (fit_ltmle_one,
-### run_mice formulas, make_counterfactual_matrix, toy pipeline)
+### run_mice formulas, make_counterfactual_matrix, toy pipeline, estimate_cate)
 # Synthetic frame shaped like build_data()'s MCS output: the 27 wide_cols_mcs
 # columns with their types, plus the make_wide()/set_exposure() attributes.
 # 12 balanced S cells. A0 ~ W; L1 ~ A0 + W (only income and employment respond
@@ -551,7 +585,11 @@ make_toy_wide_mids <- function(df, m = 2, seed = 7) {
 # so all 48 A0 x A1 x S cells are populated (min 33 at 400 per cell).
 # attr(, "truth"): sample-average regime means E[Y(a0, a1)], with the
 # counterfactual L1 drawn from the same noise.
-make_toy_2wave_df <- function(n_per_cell = 400, seed = 1) {
+# het scales stratum heterogeneity in the effects (-3 * a1 for men, +2 * a0 for
+# low education). It draws nothing, so het = 0 is the toy above, unchanged.
+# attr(, "truth_by_stratum"): the regime means and the contrasts with never per
+# stratum, labelled as make_strata() labels them.
+make_toy_2wave_df <- function(n_per_cell = 400, seed = 1, het = 0) {
   set.seed(seed)
   d <- data.table::as.data.table(expand.grid(
     sex_dv_fact_base    = factor(c("Female", "Male")),
@@ -601,7 +639,8 @@ make_toy_2wave_df <- function(n_per_cell = 400, seed = 1) {
   # and a swapped c(A0, A1) order misses the truth.
   mu_y <- function(a0, a1) {
     50 + 0.3 * (base - 50) + 0.1 * (pcs1 - 50) + 1.5 * (inc1(a0) - 10) +
-      1 * emp1(a0) + 1 * male - 0.5 * low - 1.5 * a0 - 6 * a1 - 1 * a0 * a1
+      1 * emp1(a0) + 1 * male - 0.5 * low - 1.5 * a0 - 6 * a1 - 1 * a0 * a1 +
+      het * (-3 * a1 * male + 2 * a0 * low)
   }
 
   d[, `:=`(
@@ -633,6 +672,13 @@ make_toy_2wave_df <- function(n_per_cell = 400, seed = 1) {
   )]
   data.table::setcolorder(d, wide_cols_mcs)
 
+  cell  <- interaction(d$sex_dv_fact_base, d$race_base, d$hiqual_dv_fact_base,
+                       sep = ":", drop = TRUE)
+  y_reg <- purrr::map(toy_regimes, \(r) mu_y(r[1], r[2]))
+  y_dif <- purrr::map(y_reg[-1], \(y) y - y_reg[[1]])
+  names(y_dif) <- paste(names(y_dif), "-", names(y_reg)[1])
+  y_est <- c(y_reg, y_dif)
+
   lagged <- grep("lagged", wide_cols_mcs, value = TRUE)
   purrr::iwalk(list(
     n_tvars           = 11L,
@@ -644,7 +690,12 @@ make_toy_2wave_df <- function(n_per_cell = 400, seed = 1) {
     time_points       = 2L,
     intermediate_vars = setdiff(wide_cols_mcs[-(1:4)], lagged),
     exposure_vars     = c("econ_dist_bin_0", "econ_dist_bin_1"),
-    truth             = purrr::map_dbl(toy_regimes, \(r) mean(mu_y(r[1], r[2])))
+    truth             = purrr::map_dbl(toy_regimes, \(r) mean(mu_y(r[1], r[2]))),
+    truth_by_stratum  = data.table::data.table(
+      strata_label = rep(as.character(cell), length(y_est)),
+      estimand     = rep(names(y_est), each = n),
+      y            = unlist(y_est, use.names = FALSE)
+    )[, .(truth = mean(y)), by = .(strata_label, estimand)]
   ), \(v, k) data.table::setattr(d, k, v))
   d
 }
@@ -659,176 +710,6 @@ make_toy_2wave_mids <- function(df, m = 2, seed = 7) {
                                    j = v, value = NA))
   run_mice(df_na, m = m, maxit = 1, seed = seed, outcome = "MCS")
 }
-
-### design 7 "factor handling": W contains factors.
-### Distinct per-cell tau (design review #1a): a constant tau_by_cell (e.g. the
-### generator's default rep(-2, 12)) cannot tell a correct sign from a flipped
-### one, since mean(psi) == n_j-weighted mean of the cell GATEs is an algebraic
-### identity for *any* psi, negated included. Mutation-tested by the
-### design-2026-07-30 reviewer: a negated-psi mutant and a mu0/mu1 arm-swap
-### mutant both passed every original assertion. Distinct, signed per-cell
-### effects plus an explicit sign/recovery check close that gap.
-test_that("estimate_cate runs on a small mids with factor confounders", {
-  source(here::here("R", "confounders.R"))
-  source(here::here("R", "strata_creation.R"))
-  source(here::here("R", "sl_wrappers.R"))
-  source(here::here("R", "meta_learner.R"))
-
-  tau_by_cell <- c(-6, -5, -4, -3, -2, -1, 1, 2, 3, 4, 5, 6)
-  df   <- make_toy_wide_df(n_per_cell = 100, tau_by_cell = tau_by_cell, seed = 11)
-  mids <- make_toy_wide_mids(df, m = 2, seed = 11)
-
-  res <- estimate_cate(mids, imp_idx = 1, sl_libs = c("SL.mean", "SL.glm"),
-                       outcome = "MCS")
-
-  expect_named(res, c("gate", "blp", "ate", "wald"))
-  expect_equal(nrow(res$gate), 12L)
-  expect_setequal(
-    names(res$gate),
-    c("imp", "strata_id", "strata_label", "n_j", "n_exposed", "pct_exposed",
-      "min_g", "median_g", "share_g_at_bound", "estimate", "se")
-  )
-  expect_false(anyNA(res$gate$estimate))
-  expect_true(all(res$gate$se > 0))
-  expect_equal(sum(res$gate$n_j), nrow(df))
-  expect_true(all(res$gate$min_g >= CATE_EPS & res$gate$min_g <= 1 - CATE_EPS))
-
-  expect_equal(nrow(res$blp), 2L)
-  expect_equal(res$blp$term, c("beta1_ate", "beta2_hte"))
-
-  expect_equal(res$wald$df1, 11)
-
-  # exact identity: mean(psi) is the n_j-weighted mean of the cell GATEs
-  expect_equal(res$ate$estimate,
-               sum(res$gate$estimate * res$gate$n_j) / sum(res$gate$n_j),
-               tolerance = 1e-10)
-
-  # sign and per-cell recovery: gate$estimate is Y(0)-Y(1), i.e. -tau_by_cell.
-  # A sign-flip mutant misses by ~2x|tau| (>= 2 everywhere here). Measured max
-  # error under the true code: 0.88 (no-imputation-noise floor ~0.36, through
-  # make_toy_wide_mids() ~0.70), so tolerance = 1.0 is margin, not vacuous.
-  expect_equal(res$gate$estimate, -tau_by_cell, tolerance = 1.0)
-  # beta2_hte pins near +1 when the tau proxy tracks the true heterogeneity on
-  # the conventional scale; it flips to about -1 under a sign error.
-  expect_gt(res$blp$estimate[res$blp$term == "beta2_hte"], 0.5)
-})
-
-### design review #1b: make_toy_wide_df() randomizes A at a fixed 40% per
-### cell, so ghat is exact and AIPW is invariant to which fitted model plays
-### mu0 vs mu1: double robustness under an exactly correct g, not coincidence
-### (confirmed algebraically and empirically: an arm-swap mutant passed the
-### test above). Catching an arm swap needs (i) A confounded by a continuous W
-### the tiny SL.glm/SL.mean library cannot capture (ghat NOT exact) and (ii) a
-### genuine W x A outcome interaction (mu0/mu1 differ as functions of W, not
-### by a location shift); otherwise the swap has nothing to bite on. A
-### SEPARATE generator: make_toy_wide_df() stays unchanged for Tasks 6/12.
-# A ~ quadratic logit in age (b1*age_c + b2*age_c^2): linear-only SL.glm
-# cannot recover it, so ghat stays biased at any n. Y's treatment effect is
-# linear in age (tau0 + tau_age*(age-45)), a W x A interaction SL.glm CAN fit
-# for mu0/mu1, so the arm swap is the only error source. Calibrated
-# empirically: swapping mu0_hat/mu1_hat inflates mean(psi) by ~+0.9 to +1.1
-# over the truth; correctly assigned arms recover it within ~0.15.
-make_toy_confounded_df <- function(n_per_cell = 60, tau0 = -3, tau_age = -0.4,
-                                    b1 = 2.0, b2 = -3.0, seed = 31) {
-  set.seed(seed)
-  grid <- expand.grid(
-    sex_dv_base         = factor(c("Female", "Male")),
-    race_base           = factor(c("Non.white", "White")),
-    hiqual_dv_fact_base = factor(c("High", "Low", "Medium")),
-    KEEP.OUT.ATTRS = FALSE
-  )
-  df <- grid[rep(seq_len(12), each = n_per_cell), ]
-  n  <- nrow(df)
-
-  df$sf12mcs_dv_base        <- rnorm(n, 50, 8)
-  df$age_dv_0               <- rnorm(n, 45, 10)
-  df$gor_dv_fact_0          <- factor(sample(c("London", "North.East", "Wales"), n, TRUE))
-  df$econ_dist_bin_lagged_0 <- factor(rbinom(n, 1, 0.2))
-  df$pcs_lagged_0           <- rnorm(n, 50, 8)
-  df$dnc_lagged_0           <- factor(sample(c("Zero", "One", "Two.plus"), n, TRUE))
-  df$home_owner_lagged_0    <- factor(rbinom(n, 1, 0.6))
-  df$econ_benefits_lagged_0 <- factor(rbinom(n, 1, 0.3))
-  df$mastat_lagged_0        <- factor(sample(c("Partnered", "Not.partnered"), n, TRUE))
-  df$econ_emp_bin_fact_0    <- factor(sample(c("Employed", "Not.employed"), n, TRUE))
-  df$log_income_0           <- rnorm(n, 10, 1)
-
-  age_c  <- (df$age_dv_0 - 45) / 10
-  g_true <- plogis(-0.4 + b1 * age_c + b2 * age_c^2)
-  a      <- rbinom(n, 1, g_true)
-  df$econ_dist_bin_0 <- factor(a)
-
-  df$sf12mcs_dv_0 <- 0.5 * df$sf12mcs_dv_base +
-    2 * (df$sex_dv_base == "Female") +
-    0.1 * (df$age_dv_0 - 45) +
-    a * (tau0 + tau_age * (df$age_dv_0 - 45)) +
-    rnorm(n, 0, 1)
-
-  rownames(df) <- NULL
-  df
-}
-
-test_that("estimate_cate recovers the ATE under a confounded, W x A heterogeneous DGP", {
-  source(here::here("R", "confounders.R"))
-  source(here::here("R", "strata_creation.R"))
-  source(here::here("R", "sl_wrappers.R"))
-  source(here::here("R", "meta_learner.R"))
-
-  tau0    <- -3
-  tau_age <- -0.4
-  df   <- make_toy_confounded_df(n_per_cell = 60, tau0 = tau0, tau_age = tau_age, seed = 31)
-  mids <- make_toy_wide_mids(df, m = 2, seed = 31)
-
-  res <- estimate_cate(mids, imp_idx = 1, sl_libs = c("SL.mean", "SL.glm"),
-                       outcome = "MCS")
-
-  # true ATE on the Y(0)-Y(1) scale over this sample's realized ages
-  # (tau0/tau_age fully determine it). No per-cell truth: age is iid of
-  # strata, so all 12 cells share it up to sampling noise.
-  truth <- -mean(tau0 + tau_age * (df$age_dv_0 - 45))
-  # expect_equal(tolerance =) on a *scalar* is RELATIVE (all.equal.numeric),
-  # not absolute: confirmed empirically it would silently pass the mutant this
-  # test exists to catch. So assert the absolute gap: correct arms land within
-  # ~0.05-0.15 at this n/seed; a mu0/mu1 arm swap adds ~+1.0 (measured). 0.5
-  # sits well inside that gap.
-  expect_lt(abs(res$ate$estimate - truth), 0.5)
-})
-
-### design 7 "recovery": inject known cell effects; pooled GATE_j recovers them
-test_that("pool_cate recovers injected cell-specific effects", {
-  source(here::here("R", "confounders.R"))
-  source(here::here("R", "strata_creation.R"))
-  source(here::here("R", "sl_wrappers.R"))
-  source(here::here("R", "meta_learner.R"))
-  source(here::here("R", "pool_cate.R"))
-
-  tau  <- seq(-5, 3, length.out = 12)   # conventional Y(1)-Y(0), one per stratum
-  df   <- make_toy_wide_df(n_per_cell = 150, tau_by_cell = tau, seed = 21)
-  mids <- make_toy_wide_mids(df, m = 2, seed = 21)
-
-  fits   <- purrr::map(1:2, \(i) {
-    estimate_cate(mids, imp_idx = i, sl_libs = c("SL.mean", "SL.glm"),
-                  outcome = "MCS")
-  })
-  pooled <- pool_cate(fits)
-
-  expect_named(pooled, c("gate", "blp", "ate", "wald", "m"))
-  expect_equal(pooled$m, 2L)
-  expect_equal(nrow(pooled$gate), 12L)
-  expect_equal(nrow(pooled$blp), 2L)
-  expect_equal(nrow(pooled$wald), 2L)   # one row per imputation, unpooled
-
-  # GATE_j is on the Y(0) - Y(1) scale: recover -tau, in strata_id order
-  expect_lt(max(abs(pooled$gate$estimate - (-tau))), 1)
-  expect_gt(cor(pooled$gate$estimate, -tau), 0.9)
-
-  expect_true(all(pooled$gate$ll < pooled$gate$estimate))
-  expect_true(all(pooled$gate$ul > pooled$gate$estimate))
-  expect_true(all(pooled$gate$n_j_min <= pooled$gate$n_j_max))
-
-  # marginal mean(psi) pooled too, and near the n-weighted mean of -tau
-  expect_equal(nrow(pooled$ate), 1L)
-  expect_lt(abs(pooled$ate$estimate - mean(-tau)), 0.5)
-})
 
 ### sanitize_factor_levels: fix formula-hostile levels, leave numeric codes alone
 test_that("sanitize_factor_levels fixes only levels with formula-hostile characters", {
@@ -1230,6 +1111,79 @@ test_that("pool_ltmle applies Rubin's rules and refuses a bare table", {
   expect_error(pool_ltmle(tabs[[1]]), "single")
 })
 
+test_that("pool_ltmle pools within extra by keys", {
+  source(here::here("R", "pool_ltmle.R"))
+  tab <- \(i, est) data.table::data.table(
+    imp = i, strata_id = rep(c("111", "112"), each = 2),
+    estimand = rep(c("never", "now - never"), 2), type = rep(c("mean", "ate"), 2),
+    estimate = est, variance = c(0.04, 0.09, 0.05, 0.10))
+  tabs <- list(tab(1L, c(50, -3, 48, -5)), tab(2L, c(51, -2, 47, -6)))
+  p <- pool_ltmle(tabs, by = c("strata_id", "estimand", "type"))
+  expect_named(p, c("strata_id", "estimand", "type", "effect", "se", "ll", "ul"))
+  expect_equal(nrow(p), 4L)
+  rr <- mice::pool.scalar(Q = c(48, 47), U = c(0.05, 0.05), n = Inf, k = 1)
+  expect_equal(p[strata_id == "112" & estimand == "never", effect], rr$qbar)
+  expect_equal(p[strata_id == "112" & estimand == "never", se], sqrt(rr$t))
+})
+
+test_that("pool_cate pools gate and overall with Rubin and keeps diag as a check", {
+  source(here::here("R", "pool_ltmle.R"))
+  source(here::here("R", "pool_cate.R"))
+  gate_tab <- \(i, sids, est) data.table::data.table(
+    imp = i, strata_id = rep(sids, each = 2), strata_label = rep(paste0("lab", sids), each = 2),
+    estimand = rep(c("never", "now - never"), length(sids)), type = rep(c("mean", "ate"), length(sids)),
+    estimate = est, variance = rep(c(0.04, 0.09), length(sids)))
+  overall_tab <- \(i, est) data.table::data.table(
+    imp = i, estimand = c("never", "now - never"), type = c("mean", "ate"),
+    estimate = est, variance = c(0.01, 0.02))
+  diag_tab <- \(i, sids, n_follow, min_g) data.table::data.table(
+    imp = i, strata_id = sids, strata_label = paste0("lab", sids), regime = "now",
+    n_j = 100L + i, n_follow = n_follow, pct_follow = n_follow, min_g = min_g,
+    median_g = min_g, share_g_at_bound = 0)
+  cate_one <- list(
+    list(gate = gate_tab(1L, c("111", "112"), c(50, -3, 48, -5)), overall = overall_tab(1L, c(49, -4)),
+         diag = diag_tab(1L, c("111", "112"), c(10L, 0L), c(0.2, NA))),
+    # stratum 112 is absent from imputation 2: imputed sex/race/hiqual can empty a cell
+    list(gate = gate_tab(2L, "111", c(51, -2)), overall = overall_tab(2L, c(50, -3)),
+         diag = diag_tab(2L, "111", 12L, 0.3)))
+
+  p <- expect_no_warning(pool_cate(cate_one))
+  expect_named(p, c("gate", "overall", "diag", "m"))
+  expect_equal(p$m, 2L)
+  expect_equal(p$gate, pool_ltmle(purrr::map(cate_one, "gate"),
+                                  by = c("strata_id", "strata_label", "estimand", "type")))
+  expect_equal(p$overall, pool_ltmle(purrr::map(cate_one, "overall")))
+  expect_equal(nrow(p$gate), 4L)
+  # one imputation only: Rubin has no between-imputation variance, so the SE is NA
+  expect_true(all(is.na(p$gate[strata_id == "112", se])))
+  expect_named(p$diag, c("strata_id", "strata_label", "regime", "n_j_min", "n_j_max",
+                         "n_follow_min", "pct_follow", "min_g", "median_g", "share_g_at_bound"))
+  d111 <- p$diag[strata_id == "111"]
+  expect_equal(c(d111$n_j_min, d111$n_j_max, d111$n_follow_min, d111$min_g), c(101, 102, 10, 0.2))
+  expect_true(is.na(p$diag[strata_id == "112", min_g]))
+  expect_error(pool_cate(cate_one[[1]]), "single")
+})
+
+test_that("toy pipeline: estimate_cate -> pool_cate on two imputations", {
+  source(here::here("R", "run_mice.R"))
+  source(here::here("R", "sl_wrappers.R"))
+  source(here::here("R", "confounders.R"))
+  source(here::here("R", "strata_creation.R"))
+  source(here::here("R", "meta_learner.R"))
+  source(here::here("R", "pool_ltmle.R"))
+  source(here::here("R", "pool_cate.R"))
+  df   <- make_toy_2wave_df(n_per_cell = 400, het = 1)
+  mids <- make_toy_2wave_mids(df, m = 2)
+  p <- purrr::map(1:2, \(i) estimate_cate(mids, i, c("SL.mean", "SL.glm"), "MCS",
+                                          toy_regimes, toy_cv, gbound = 0.001)) |> pool_cate()
+  expect_equal(nrow(p$gate), 84L)
+  expect_equal(p$overall$estimand, ltmle_estimands)
+  expect_false(anyNA(p$gate$se))
+  expect_true(all(p$gate$ll < p$gate$effect & p$gate$effect < p$gate$ul))
+  tr <- merge(p$gate, attr(df, "truth_by_stratum"), by = c("strata_label", "estimand"))
+  expect_lt(max(abs(tr$effect - tr$truth) / tr$se), 4)
+})
+
 test_that("make_counterfactual_matrix follows the DAG and the ltmle adjustment set", {
   source(here::here("R", "helpers.R"))
   source(here::here("R", "confounders.R"))
@@ -1305,6 +1259,176 @@ test_that("toy pipeline: mice -> ltmle -> pool -> gformula -> comparison", {
   truth <- attr(df, "truth")[cmp$marginal$intervention]
   expect_lt(max(abs(cmp$marginal$tmle_effect - truth)), 1.5)
   expect_lt(max(abs(cmp$marginal$mi_effect - truth)), 2.5)
+})
+
+## ---- two-time-point DR-learner (toy data) ------------------------------------
+
+test_that("make_toy_2wave_df keeps the pinned toy at het = 0 and adds stratum truths", {
+  d0 <- make_toy_2wave_df(n_per_cell = 50)
+  # values recorded from the generator before `het` existed
+  expect_equal(attr(d0, "truth"),
+               c(never = 51.4187601478786, before = 49.4570934812119,
+                 now = 45.4187601478786, permanent = 42.4570934812119), tolerance = 1e-10)
+  expect_equal(sum(d0$sf12mcs_dv_1), 29710.7993430944, tolerance = 1e-10)
+  tb <- attr(make_toy_2wave_df(n_per_cell = 50, het = 1), "truth_by_stratum")
+  expect_named(tb, c("strata_label", "estimand", "truth"))
+  expect_equal(nrow(tb), 84L)
+  expect_setequal(unique(tb$estimand), ltmle_estimands)
+  expect_gt(diff(range(tb[estimand == "permanent - never", truth])), 3)
+
+  # het adds exactly its term to each stratum's truth (same seed, same noise)
+  t0 <- attr(make_toy_2wave_df(n_per_cell = 50, het = 0), "truth_by_stratum")
+  m  <- merge(tb, t0, by = c("strata_label", "estimand"), suffixes = c("_1", "_0"))
+  parts <- strsplit(m$strata_label, ":", fixed = TRUE)
+  male  <- purrr::map_lgl(parts, \(p) p[1] == "Male")
+  low   <- purrr::map_lgl(parts, \(p) p[3] == "Low")
+  term  <- list(never = 0, before = 2 * low, now = -3 * male,
+                permanent = -3 * male + 2 * low,
+                "before - never" = 2 * low, "now - never" = -3 * male,
+                "permanent - never" = -3 * male + 2 * low)
+  expect_equal(nrow(m), 84L)
+  expect_equal(m$truth_1 - m$truth_0,
+               purrr::map_dbl(seq_len(nrow(m)), \(i) rep_len(term[[m$estimand[i]]], nrow(m))[i]),
+               tolerance = 1e-10)
+})
+
+test_that("cate_nodes splits confounders like fit_ltmle_one and picks the outcome column", {
+  source(here::here("R", "confounders.R"))
+  source(here::here("R", "meta_learner.R"))
+  purrr::walk(c("MCS", "PCS"), \(o) {
+    nd <- cate_nodes(o)
+    x  <- confounders(o)
+    expect_identical(nd$W, grep("_1$", x, value = TRUE, invert = TRUE))
+    expect_identical(nd$L, grep("_1$", x, value = TRUE))
+    expect_identical(nd$A, c("econ_dist_bin_0", "econ_dist_bin_1"))
+  })
+  expect_identical(cate_nodes("MCS")$Y, "sf12mcs_dv_1")
+  expect_identical(cate_nodes("PCS")$Y, "sf12pcs_dv_1")
+  expect_error(cate_nodes("XXX"))
+})
+
+test_that("estimate_cate refuses stacked imputations and malformed arguments", {
+  source(here::here("R", "run_mice.R"))
+  source(here::here("R", "sl_wrappers.R"))
+  source(here::here("R", "confounders.R"))
+  source(here::here("R", "strata_creation.R"))
+  source(here::here("R", "meta_learner.R"))
+  mids <- make_toy_2wave_mids(make_toy_2wave_df(n_per_cell = 100), m = 2)
+  sl <- c("SL.mean", "SL.glm")
+  expect_error(estimate_cate(mids, 1:2, sl, "MCS", toy_regimes, toy_cv), "imp_idx")
+  expect_error(estimate_cate(mids, 1, sl, "MCS", toy_regimes, toy_cv, gbound = c(0.001, 1)), "gbound")
+  expect_error(estimate_cate(mids, 1, sl, "MCS", toy_regimes, toy_cv, gbound = 0.5), "gbound")
+  expect_error(estimate_cate(mids, 1, sl, "MCS", unname(toy_regimes), toy_cv), "regimes")
+  expect_error(estimate_cate(mids, 1, sl, "MCS", list(never = c(0L, 2L)), toy_cv), "regimes")
+  expect_error(estimate_cate(mids, 1, sl, "MCS", toy_regimes, list(5L, FALSE, TRUE)), "sl_cv_control")
+})
+
+test_that("estimate_cate recovers stratum means and differences on the two-wave toy", {
+  source(here::here("R", "run_mice.R"))
+  source(here::here("R", "sl_wrappers.R"))
+  source(here::here("R", "confounders.R"))
+  source(here::here("R", "strata_creation.R"))
+  source(here::here("R", "meta_learner.R"))
+  # 800 per cell: at 400 a stratum's SE (~1 point) against the truths' spread
+  # (sd ~1.8) puts cor(perm) below 0.8 for 1 seed in 5
+  df   <- make_toy_2wave_df(n_per_cell = 800, het = 1)
+  mids <- make_toy_2wave_mids(df, m = 1)
+  res  <- estimate_cate(mids, 1, c("SL.mean", "SL.glm"), "MCS", toy_regimes, toy_cv, gbound = 0.001)
+
+  expect_named(res, c("gate", "overall", "diag"))
+  expect_named(res$gate, c("imp", "strata_id", "strata_label", "estimand", "type", "estimate", "variance"))
+  expect_equal(nrow(res$gate), 84L)
+  expect_type(res$gate$strata_id, "character")
+  expect_named(res$overall, c("imp", "estimand", "type", "estimate", "variance"))
+  expect_equal(res$overall$estimand, ltmle_estimands)
+  expect_equal(res$overall$type, rep(c("mean", "ate"), c(4, 3)))
+  expect_named(res$diag, c("imp", "strata_id", "strata_label", "regime", "n_j", "n_follow",
+                           "pct_follow", "min_g", "median_g", "share_g_at_bound"))
+  expect_equal(nrow(res$diag), 48L)
+  expect_true(all(res$diag$min_g >= 0.001, na.rm = TRUE))
+
+  # the whole-sample estimate is the n_j-weighted mean of the strata, exactly
+  n_j <- unique(res$diag[, .(strata_id, n_j)])
+  w   <- merge(res$gate, n_j, by = "strata_id")[, .(est = sum(estimate * n_j) / sum(n_j)), by = estimand]
+  expect_equal(w$est[match(res$overall$estimand, w$estimand)], res$overall$estimate, tolerance = 1e-10)
+
+  # recovery within 4 SE of the stratum truth; heterogeneity found; reductions negative
+  tr <- merge(res$gate, attr(df, "truth_by_stratum"), by = c("strata_label", "estimand"))
+  expect_equal(nrow(tr), 84L)
+  expect_lt(max(abs(tr$estimate - tr$truth) / sqrt(tr$variance)), 4)
+  perm <- tr[estimand == "permanent - never"]
+  expect_gt(stats::cor(perm$estimate, perm$truth), 0.8)
+  expect_true(all(perm$estimate < 0))
+
+  # variance is calibrated: mean z^2 is ~1.1 over 20 toy seeds (0.85-1.66); a
+  # variance off by 4x either way falls outside
+  expect_gt(mean(((tr$estimate - tr$truth)^2) / tr$variance), 0.5)
+  expect_lt(mean(((tr$estimate - tr$truth)^2) / tr$variance), 2)
+})
+
+test_that("estimate_cate overall agrees with fit_ltmle_one on the same imputation", {
+  source(here::here("R", "run_mice.R"))
+  source(here::here("R", "sl_wrappers.R"))
+  source(here::here("R", "confounders.R"))
+  source(here::here("R", "strata_creation.R"))
+  source(here::here("R", "meta_learner.R"))
+  source(here::here("R", "fit_ltmle_one.R"))
+  mids <- make_toy_2wave_mids(make_toy_2wave_df(n_per_cell = 400), m = 1)
+  dr <- estimate_cate(mids, 1, c("SL.mean", "SL.glm"), "MCS", toy_regimes, toy_cv, gbound = 0.001)$overall
+  lt <- fit_ltmle_one(mids, 1, "glm", "MCS", toy_regimes, toy_cv, toy_gbound)
+  expect_equal(dr$estimand, lt$estimand)
+  expect_equal(dr$type, lt$type)
+  # same estimands, same sign: one-step DR and TMLE differ by well under one SE
+  expect_lt(max(abs(dr$estimate - lt$estimate) / sqrt(lt$variance)), 1)
+  # same influence-curve variance up to estimator differences (0.94-1.21 over 20 seeds)
+  ratio <- dr$variance / lt$variance
+  expect_gt(min(ratio), 0.5)
+  expect_lt(max(ratio), 2)
+})
+
+test_that("estimate_cate is doubly robust: either nuisance alone recovers the truth", {
+  source(here::here("R", "run_mice.R"))
+  source(here::here("R", "sl_wrappers.R"))
+  source(here::here("R", "confounders.R"))
+  source(here::here("R", "strata_creation.R"))
+  source(here::here("R", "meta_learner.R"))
+  # glm for one nuisance, the mean for the other: recovery rests on the first one's
+  # wiring alone, so double robustness cannot mask a bug in it. SuperLearner finds
+  # learners from globalenv(), not from the test environment.
+  right_for <- \(binary) \(Y, X, newX, family, ...)
+    (if (all(Y %in% 0:1) == binary) SuperLearner::SL.glm else SuperLearner::SL.mean)(Y, X, newX, family, ...)
+  assign("SL.g_right", right_for(TRUE),  envir = globalenv())
+  assign("SL.q_right", right_for(FALSE), envir = globalenv())
+  withr::defer(rm("SL.g_right", "SL.q_right", envir = globalenv()))
+
+  df    <- make_toy_2wave_df(n_per_cell = 800, het = 1)
+  mids  <- make_toy_2wave_mids(df, m = 1)
+  truth <- stats::setNames(c(attr(df, "truth"), attr(df, "truth")[-1] - attr(df, "truth")[1]),
+                           ltmle_estimands)
+  # max |z| cut-offs (overall, gate), set from a 20-seed sweep. Correct code: g right
+  # <= 2.04 / 3.25, Q right <= 3.43 / 3.61. Mutants: pi1 not cumulative and g0 arm
+  # swap (g right) >= 3.06 / 4.58; Q2 fitted on A0 = a0 rows (Q right) >= 10.1 / 5.04.
+  cut <- list(SL.g_right = c(ov = 2.6, gate = 3.9), SL.q_right = c(ov = 6, gate = 4.3))
+  purrr::walk(names(cut), \(lib) {
+    r  <- estimate_cate(mids, 1, lib, "MCS", toy_regimes, toy_cv, gbound = 0.001)
+    ov <- r$overall
+    expect_lt(max(abs(ov$estimate - truth[ov$estimand]) / sqrt(ov$variance)), cut[[lib]][["ov"]])
+    tr <- merge(r$gate, attr(df, "truth_by_stratum"), by = c("strata_label", "estimand"))
+    expect_lt(max(abs(tr$estimate - tr$truth) / sqrt(tr$variance)), cut[[lib]][["gate"]])
+  })
+})
+
+test_that("estimate_cate enforces gbound on the cumulative g", {
+  source(here::here("R", "run_mice.R"))
+  source(here::here("R", "sl_wrappers.R"))
+  source(here::here("R", "confounders.R"))
+  source(here::here("R", "strata_creation.R"))
+  source(here::here("R", "meta_learner.R"))
+  mids <- make_toy_2wave_mids(make_toy_2wave_df(n_per_cell = 400), m = 1)
+  res  <- estimate_cate(mids, 1, c("SL.mean", "SL.glm"), "MCS", toy_regimes, toy_cv, gbound = 0.2)
+  expect_true(all(res$diag$min_g >= 0.2, na.rm = TRUE))
+  # P(permanent) is ~0.06 here, so the bound binds
+  expect_true(any(res$diag$share_g_at_bound > 0, na.rm = TRUE))
 })
 
 ### MAIHDA layer: the 2 x 2 x 3 design from the stratum labels
