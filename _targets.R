@@ -236,18 +236,19 @@ list(
     } else {
       import_data(force = TRUE) |> clean_data() |> preproc_data()
     },
-    cue = tar_cue(mode = "always"),
     description = "Data importing and formatting"
   ),
 
   # Imputation index, shared by every specs row
-  tar_target(ltmle_imp_idx, seq_len(mice_m)),
+  tar_target(ltmle_imp_idx, 
+             seq_len(mice_m),
+             description = "Mice array of imputations"),
 
   map_pipe,
 
   tar_combine(ltmle_results_all, map_pipe[["ltmle_results"]],
               command = dplyr::bind_rows(!!!.x, .id = "target")),
 
-  # Single report covering both outcomes
-  tarchetypes::tar_quarto(report, "07_single_treatment.qmd")
+  # LTMLE report
+  tarchetypes::tar_quarto(report, "09_ltmle.qmd")
 )
