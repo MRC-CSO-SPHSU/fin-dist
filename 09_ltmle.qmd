@@ -381,90 +381,56 @@ ggsave(
 
 # Secondary analysis: effect measure modification by intersectional stratum (DR-learner)
 
-::: {.callout-note}
-Placeholder: the DR-learner has not been adapted to the two-wave regimes yet. It still estimates the effect of financial distress at `start_wave` (`econ_dist_bin_0`) on SF-12 at `start_wave` (`sf12mcs_dv_0` / `sf12pcs_dv_0`), so its estimates are not directly comparable with the LTMLE contrasts above.
-:::
+The marginal LTMLE above gives population-average effects. This section asks *for whom* the effect differs: additive-scale effect measure modification by intersectional social position. We estimate the *GATE* (group average treatment effect) of each of the four regimes, and of each contrast with `never`, within the 12 strata $j$ (sex × ethnicity × education), with the DR-learner approach of [**Chernozhukov et al. 2022**](https://causalml-book.org/chapters/CausalML_book_2022.pdf):
 
-The marginal LTMLE above gives population-average effects. This section asks *for whom* the effect differs: additive-scale effect measure modification by intersectional social position. We estimate the *GATE* (group average treatment effect). The estimator consists in a **stratum-specific average causal effect** $\Delta_j$ for each of the 12 strata $j$ (sex × ethnicity × education):
+$$\mu_j(\bar a) = E[\,Y^{\bar a} \mid S = j\,], \qquad \Delta_j(\bar a) = E[\,Y^{\bar a} - Y^{\text{never}} \mid S = j\,]$$
 
-$$\Delta_j = E[\,Y^{a=1} - Y^{a=0} \mid S = j\,]$$
+for $\bar a \in \{\text{never}, \text{before}, \text{now}, \text{permanent}\}$ (means) and $\bar a \in \{\text{before}, \text{now}, \text{permanent}\}$ (contrasts). As in the LTMLE contrasts, a negative $\Delta_j$ is a reduction in SF-12 points.
 
-$Y^{a=0}$ is the counterfactual SF-12 score had the person not been in financial distress and $Y^{a=1}$ the counterfactual outcome had they been in financial distress. Each person's doubly robust pseudo-outcome is built from out-of-fold predictions of separately fitted SuperLearner models for the outcome regression and the propensity score, then averaged within stratum by a regression on stratum indicators with heteroskedasticity-consistent (HC2; robust) standard errors. Estimates are pooled across imputations with Rubin's rules.
+For each regime we build one sequential doubly robust pseudo-outcome per person (Bang & Robins 2005), from out-of-fold SuperLearner predictions: exposure models at both waves, an outcome model at the final wave among the people who followed the regime, and its sequential regression on baseline covariates. The cumulative probability of following each regime is bounded below at 0.001. We average the pseudo-outcomes within stratum, with influence-curve standard errors, and pool the estimates across imputations with Rubin's rules.
 
 ## Effects by stratum
+
+```{r cate-means-table}
+#| output: true
+#| column: screen-inset
+gate  <- bind_scales(cate_results, \(x) x$gate)
+waves <- levels(gate$wave)
+
+# One row per estimand x stratum; the window x scale blocks line up with the spanners.
+cate_wide <- function(type_, levels_, caption) {
+  gate |>
+    filter(type == type_) |>
+    mutate(estimand     = factor(estimand, levels = levels_),
+           strata_label = as.character(strata_label)) |>
+    select(scale, wave, estimand, strata_id, strata_label, effect, ll, ul) |>
+    # names_sort orders the blocks by factor level (wave, then scale) so they line up with the spanners.
+    pivot_wider(names_from  = c(wave, scale),
+                values_from = c(effect, ll, ul),
+                names_vary  = "slowest",
+                names_sort  = TRUE) |>
+    arrange(estimand, strata_id) |>
+    select(-strata_id) |>
+    mutate(estimand = as.character(estimand)) |>
+    knitr::kable(
+      digits    = 2,
+      col.names = c("Estimand", "Stratum (sex:race:education)",
+                    rep(c("Effect", "LL", "UL"), length(waves) * length(scales))),
+      caption   = caption
+    ) |>
+    kableExtra::add_header_above(c(" " = 2, setNames(rep(3, length(waves) * length(scales)), rep(scales, length(waves))))) |>
+    kableExtra::add_header_above(c(" " = 2, setNames(rep(3 * length(scales), length(waves)), window_labels[waves])))
+}
+
+cate_wide("mean", regimes,
+          "Stratum-specific counterfactual mean SF-12 score under each regime by SF-12 scale, pooled across imputations with Rubin's rules")
+```
 
 ```{r cate-table}
 #| output: true
 #| column: screen-inset
-gate <- bind_scales(cate_results, \(x) x$gate)
-waves <- levels(gate$wave)
-
-gate |>
-  select(scale, wave, strata_id, strata_label, estimate, ll, ul) |>
-  # names_sort orders the blocks by factor level (wave, then scale) so they line up with the spanners.
-  pivot_wider(names_from  = c(wave, scale),
-              values_from = c(estimate, ll, ul),
-              names_vary  = "slowest",
-              names_sort  = TRUE) |>
-  arrange(strata_id) |>
-  select(-strata_id) |>
-  knitr::kable(
-    digits    = 2,
-    col.names = c("Stratum (sex:race:education)",
-                  rep(c("Effect (Δ)", "LL", "UL"), length(waves) * length(scales))),
-    caption   = "Stratum-specific average causal effects by SF-12 scale, pooled across imputations with Rubin's rules"
-  ) |>
-  kableExtra::add_header_above(c(" " = 1, setNames(rep(3, length(waves) * length(scales)), rep(scales, length(waves))))) |>
-  kableExtra::add_header_above(c(" " = 1, setNames(rep(3 * length(scales), length(waves)), window_labels[waves])))
-```
-
-## Is the effect modification real?
-To asses this question, we included the Chernozhukov *best linear predictor* (BLP) coefficient $\beta_2$ (on the $Y^{a=1}-Y^{a=0}$ scale; $\beta_2 \neq 0$, which answer whether the between-stratum variation is systematic rather than sampling noise)
-
-```{r cate-heterogeneity}
-#| output: true
-blp <- bind_scales(cate_results, \(x) x$blp)
-waves <- levels(blp$wave)
-
-blp |>
-  pivot_wider(names_from  = wave,
-              values_from = c(estimate, se, ll, ul),
-              names_vary  = "slowest") |>
-  knitr::kable(
-    digits    = 3,
-    col.names = c("Scale", "Term",
-                  rep(c("Estimate", "SE", "LL", "UL"), length(waves))),
-    caption = "BLP test for effect modification by SF-12 scale, pooled across imputations (HC3 robust SEs within imputation). beta1_ate is the population-average effect on the conventional \\(Y^{a=1} - Y^{a=0}\\) scale. beta2_hte ≠ 0 is evidence that the 12 strata genuinely differ."
-  ) |>
-  kableExtra::add_header_above(c(" " = 2, setNames(rep(4, length(waves)), window_labels[waves])))
-```
-
-```{r wald-test}
-#| output: false
-#| include: false
-#| eval: true
-
-## The omnibus Wald test of homogeneity $\Delta_1 = \dots = \Delta_{12}$
-wald <- bind_scales(cate_results, \(x) x$wald)
-
-stopifnot(
-  "wald test df1 differs across imputations -- stratum count is not stable" =
-    all(dplyr::summarise(wald, k = dplyr::n_distinct(df1), .by = c(scale, wave))$k == 1)
-)
-
-wald |>
-  summarise(
-    `median F` = median(F),
-    df1        = first(df1),
-    `median p` = median(p),
-    `min p`    = min(p),
-    `max p`    = max(p),
-    .by = c(scale, wave)
-  ) |>
-  knitr::kable(
-    digits  = 3,
-    caption = "Omnibus Wald test of effect homogeneity across strata ($\\Delta_1 = \\dots = \\Delta_{12}$), by SF-12 scale. F statistics are not Rubin-pooled; the median and range across imputations are shown."
-  )
+cate_wide("ate", contrasts,
+          "Stratum-specific contrasts with never (negative = SF-12 points lost) by SF-12 scale, pooled across imputations with Rubin's rules")
 ```
 
 ```{r cate-sanity}
@@ -472,34 +438,19 @@ wald |>
 #| include: false
 #| eval: true
 
-### Marginal mean of the DR score against the sign-flipped LTMLE contrasts (as a diagnostic check).
+### Marginal DR-learner estimates against the LTMLE (as a diagnostic check).
 
-# Each LTMLE contrast with `never` is sign-flipped onto the DR score's
-# Y^{a=0} - Y^{a=1} scale; ll/ul swap places under the flip.
-ltmle_ate <- bind_scales(ltmle_results) |> filter(type == "ate")
-dr_ate    <- bind_scales(cate_results, \(x) x$ate)
-
+# Both target the same estimands on the same scale, so no sign flip is needed.
 bind_rows(
-  dr_ate |>
-    transmute(scale,
-              wave,
-              quantity = "Pooled mean(ψ) — DR score, $Y^{a=0} - Y^{a=1}$ scale",
-              estimate, ll, ul),
-  ltmle_ate |>
-    # The flipped bounds are computed in a separate mutate() on purpose:
-    # transmute() evaluates its arguments in order against a data mask that
-    # updates as it goes, so `ll = -ul, ul = -ll` in one call would read the
-    # already-overwritten `ll` and hand back the original `ul` unchanged.
-    mutate(flip_ll = -ul, flip_ul = -ll) |>
-    transmute(scale,
-              wave,
-              quantity = paste("−1 × LTMLE", estimand),
-              estimate = -effect, ll = flip_ll, ul = flip_ul)
+  bind_scales(cate_results, \(x) x$overall) |> mutate(method = "DR-learner"),
+  bind_scales(ltmle_results)                 |> mutate(method = "LTMLE")
 ) |>
-  arrange(scale, wave) |>
+  mutate(estimand = factor(estimand, levels = c(regimes, contrasts))) |>
+  arrange(scale, wave, estimand, type, method) |>
+  select(scale, wave, estimand, method, effect, ll, ul) |>
   knitr::kable(
     digits  = 3,
-    caption = "Diagnostic check by SF-12 scale: the marginal mean of the DR score against each sign-flipped LTMLE contrast with never. Until the DR-learner is adapted to the two-wave regimes, the two target different estimands, so agreement is not expected yet."
+    caption = "Diagnostic check by SF-12 scale: the marginal DR-learner estimate of each regime mean and contrast with never against the LTMLE. The two target the same estimands and should agree."
   )
 ```
 
@@ -510,38 +461,44 @@ bind_rows(
 #| include: true
 #| eval: true
 #| column: page
-#| fig-cap: "Stratum-specific average causal effect of financial distress at the start wave on the SF-12 mental (MCS) and physical (PCS) component summaries at the start wave (95% CI), by window (waves 3–4, 8–9 and 12–13). The estimates are represented in positive values, thus should be interpreted as points lost to distress. Strata are ordered by the waves 8–9 MCS effect. Dashed lines are that scale's and window's marginal LTMLE contrasts with never, sign-flipped: red, before − never; blue, now − never; green, permanent − never."
+#| fig-cap: "Stratum-specific contrasts of each financial distress regime with never being distressed, for the SF-12 mental (MCS) and physical (PCS) component summaries (95% CI), by window (waves 3–4, 8–9 and 12–13). Negative values are SF-12 points lost relative to never being distressed. Strata are ordered by the waves 8–9 MCS permanent − never effect. Dashed lines are that scale's and window's marginal LTMLE contrast."
 #| fig-width: 15
-#| fig-height: 6
+#| fig-height: 12
 
 # One stratum order for every window (sorted by the index window's MCS effect),
 # so the rows line up across the three panels.
-strata_order <- gate |>
-  filter(scale == "MCS", wave == "w8.9") |>
-  arrange(estimate) |>
-  pull(strata_label)
-strata_order <- unique(c(strata_order, setdiff(gate$strata_label, strata_order)))
+gate_ate <- gate |>
+  filter(type == "ate") |>
+  mutate(estimand = factor(estimand, levels = contrasts))
 
-ref_ate <- ltmle_ate |>
-  transmute(scale, wave, estimand = factor(estimand, levels = contrasts), ref = -effect)
+strata_order <- gate_ate |>
+  filter(scale == "MCS", wave == "w8.9", estimand == "permanent - never") |>
+  arrange(effect) |>
+  pull(strata_label) |>
+  as.character()
+strata_order <- unique(c(strata_order, setdiff(as.character(gate_ate$strata_label), strata_order)))
+
+ref_ate <- bind_scales(ltmle_results) |>
+  filter(type == "ate") |>
+  transmute(scale, wave, estimand = factor(estimand, levels = contrasts), ref = effect)
 
 cate_caterpillar <- plot_by_wave(
-  \(w) gate |>
+  \(w) gate_ate |>
     filter(wave == w) |>
-    mutate(strata_label = factor(strata_label, levels = strata_order)) |>
-    ggplot(aes(x = estimate, y = strata_label)) +
+    mutate(strata_label = factor(as.character(strata_label), levels = strata_order)) |>
+    ggplot(aes(x = effect, y = strata_label)) +
     theme_bw() +
     geom_vline(xintercept = 0, linetype = "dotted", colour = "grey60") +
     geom_vline(data = filter(ref_ate, wave == w), aes(xintercept = ref, colour = estimand),
                linetype = "dashed") +
-    geom_pointrange(aes(xmin = ll, xmax = ul), size = 0.4) +
+    geom_pointrange(aes(xmin = ll, xmax = ul, colour = estimand), size = 0.4) +
     # drop = FALSE keeps each contrast's colour fixed across panels, matching the contrast plot.
     scale_colour_brewer(palette = "Set1", drop = FALSE) +
-    labs(x = "SF-12 points lost to financial distress (95% CI)",
+    labs(x = "Difference in SF-12 points from never distressed (95% CI)",
          y = NULL) +
-    facet_wrap(~scale, scales = "fixed") +
+    facet_grid(estimand ~ scale) +
     theme(panel.grid.minor = element_blank()),
-  xlim = range(0, gate$ll, gate$ul, ref_ate$ref)
+  xlim = range(0, gate_ate$ll, gate_ate$ul, ref_ate$ref, na.rm = TRUE)
 )
 
 print(cate_caterpillar)
@@ -549,7 +506,7 @@ print(cate_caterpillar)
 ggsave(
   filename = here::here("outputs", "figs", "ltmle_cate_caterpillar.png"),
   plot     = cate_caterpillar,
-  width = 15, height = 6, dpi = 300
+  width = 15, height = 12, dpi = 300
 )
 ```
 
