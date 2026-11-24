@@ -1,6 +1,6 @@
 # Rubin's rules over the list of per-imputation tables from a
 # map()/iteration = "list" target.
-pool_ltmle <- function(ltmle_one) {
+pool_ltmle <- function(ltmle_one, by = c("estimand", "type")) {
   if (is.data.frame(ltmle_one)) {
     stop("pool_ltmle() got a single per-imputation table, not a list of them -- ",
          "is the upstream target missing pattern = map(ltmle_imp_idx), iteration = \"list\"?",
@@ -10,5 +10,5 @@ pool_ltmle <- function(ltmle_one) {
     p  <- mice::pool.scalar(Q = estimate, U = variance, n = Inf, k = 1)
     se <- sqrt(p$t)
     .(effect = p$qbar, se = se, ll = p$qbar - 1.96 * se, ul = p$qbar + 1.96 * se)
-  }, by = .(estimand, type)]
+  }, by = by]
 }
