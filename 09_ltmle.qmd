@@ -169,27 +169,24 @@ tar_load(c(ltmle_results_w3.4_MCS,         ltmle_results_w3.4_PCS,
            cate_results_w12.13_MCS,        cate_results_w12.13_PCS),
          store = tar_store)
 
-# One list element per window x scale, named "<scale>_<window>" for bind_scales().
-read_windows <- function(stem) {
-  ids <- tidyr::expand_grid(window = names(window_labels), scale = scales)
-  map2(ids$window, ids$scale, \(w, s) get(paste(stem, w, s, sep = "_"))) |>
-    setNames(paste(ids$scale, ids$window, sep = "_"))
-}
+# Named "<scale>_<window>" for bind_scales(); mget() stops on a name not loaded above.
+ids <- expand_grid(window = names(window_labels), scale = scales)
+read_windows <- \(stem) setNames(mget(paste(stem, ids$window, ids$scale, sep = "_"), inherits = TRUE),
+                                 paste(ids$scale, ids$window, sep = "_"))
 
 ltmle_results       <- read_windows("ltmle_results")
 ltmle_sens1_results <- read_windows("ltmle_sens1_results")
 comparison          <- read_windows("comparison")
 cate_results        <- read_windows("cate_results")
 
-# Tables and plots match regimes by label, so stop if the pipeline's labels drift.
-stopifnot(all(map_lgl(ltmle_results, \(x) setequal(x$estimand, c(regimes, contrasts)))))
+# Tables and plots match regimes by label: stop if pipeline labels drift.
+stopifnot(map_lgl(ltmle_results, \(x) setequal(x$estimand, c(regimes, contrasts))))
 
 # Stack a per-scale list into one tibble.
 bind_scales <- function(x, f = identity) {
-  dplyr::bind_rows(map(x, f), .id = "id") |>
-    tidyr::separate_wider_delim(id, delim = "_", names = c("scale", "wave")) |>
-    dplyr::mutate(scale = factor(scale, levels = scales),
-                  wave = factor(wave, levels = names(window_labels)))
+  bind_rows(map(x, f), .id = "id") |>
+    separate_wider_delim(id, delim = "_", names = c("scale", "wave")) |>
+    mutate(scale = factor(scale, levels = scales), wave = factor(wave, levels = names(window_labels)))
 }
 ```
 
