@@ -155,11 +155,24 @@ window_labels <- c(w3.4 = "Waves 3–4", w8.9 = "Waves 8–9", w12.13 = "Waves 1
 regimes   <- c("never", "before", "now", "permanent")
 contrasts <- paste(regimes[-1], "-", regimes[1])
 
+tar_load(c(ltmle_results_w3.4_MCS,         ltmle_results_w3.4_PCS,
+           ltmle_results_w8.9_MCS,         ltmle_results_w8.9_PCS,
+           ltmle_results_w12.13_MCS,       ltmle_results_w12.13_PCS,
+           ltmle_sens1_results_w3.4_MCS,   ltmle_sens1_results_w3.4_PCS,
+           ltmle_sens1_results_w8.9_MCS,   ltmle_sens1_results_w8.9_PCS,
+           ltmle_sens1_results_w12.13_MCS, ltmle_sens1_results_w12.13_PCS,
+           comparison_w3.4_MCS,            comparison_w3.4_PCS,
+           comparison_w8.9_MCS,            comparison_w8.9_PCS,
+           comparison_w12.13_MCS,          comparison_w12.13_PCS,
+           cate_results_w3.4_MCS,          cate_results_w3.4_PCS,
+           cate_results_w8.9_MCS,          cate_results_w8.9_PCS,
+           cate_results_w12.13_MCS,        cate_results_w12.13_PCS),
+         store = tar_store)
+
 # One list element per window x scale, named "<scale>_<window>" for bind_scales().
 read_windows <- function(stem) {
   ids <- tidyr::expand_grid(window = names(window_labels), scale = scales)
-  map2(ids$window, ids$scale,
-       \(w, s) tar_read_raw(paste(stem, w, s, sep = "_"), store = tar_store)) |>
+  map2(ids$window, ids$scale, \(w, s) get(paste(stem, w, s, sep = "_"))) |>
     setNames(paste(ids$scale, ids$window, sep = "_"))
 }
 
