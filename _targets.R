@@ -47,10 +47,6 @@ tar_option_set(
     "here",
     "mice",
     "gFormulaMI",
-    "estimatr",
-    "car",
-    "lmtest",
-    "sandwich",
     "ltmle",
     "miceadds",
     "SuperLearner",
@@ -78,7 +74,7 @@ mice_maxit  <- 20
 seed_random <- 20261022
 ## gFormulaMI: gFormulaImpute() uses mids$m (= mice_m) when given a mids, so M is ignored.
 gform_M <- 50
-cate_gbound <- 0.001 # non-aggressive, symmetric bounding
+cate_gbound <- 0.001 # lower bound on each regime's cumulative g, as ltmle_bound[1]
 ## ltmle lower bound (non-aggressive) on each regime's cumulative g,
 ltmle_bound <- c(0.001, 1)
 sen_ltmle_bound <- c(0.025, 1)
@@ -104,14 +100,16 @@ ltmle_regimes <- list(never      = c(0L, 0L),
                       permanent  = c(1L, 1L))
 
 ## SuperLearner's internal V-fold CV for the ensemble weights of every ltmle Q/g
-## fit, not TMLE cross-fitting (ltmle has none). ltmle accepts only
-## V/stratifyCV/shuffle; stratifyCV must stay FALSE as the Q outcomes are continuous.
+## fit and every estimate_cate() (DR-learner) nuisance fit, not TMLE cross-fitting
+## (ltmle has none). ltmle accepts only V/stratifyCV/shuffle; stratifyCV must stay
+## FALSE as the Q outcomes are continuous.
 sl_cv_control <- list(V = 5L,
                       stratifyCV = FALSE,
                       shuffle = TRUE)
 
-## SuperLearner library for the ltmle Q- and g-models. SL.poly2/3 and SL.*.ltmle
-## are the custom wrappers in R/sl_wrappers.R.
+## SuperLearner library for the ltmle Q- and g-models and the estimate_cate()
+## (DR-learner) nuisances. SL.poly2/3 and SL.*.ltmle are the custom wrappers in
+## R/sl_wrappers.R.
 sl_libs <- c("SL.mean", "SL.glm", "SL.poly2", "SL.poly3", "SL.gam",
              "SL.nnet.ltmle", "SL.rf.ltmle", "SL.xgboost.ltmle")
 
@@ -193,8 +191,8 @@ map_pipe <- tar_map(
             )),
 
   # ---------- Heterogeneous Treatment Effects: DR-learner CATEs ---------------
-  # Still single-exposure (econ_dist_bin_0, sf12*_0) until the CATE scripts are
-  # adapted to transitions. Reuses ltmle_imp_idx so its branches line up with ltmle_one.
+  # Two-time-point DR-learner: stratum means and mean differences under ltmle_regimes.
+  # Reuses ltmle_imp_idx so its branches line up with ltmle_one.
   tar_target(
     cate_one,
     estimate_cate(
@@ -202,6 +200,8 @@ map_pipe <- tar_map(
       imp_idx   = ltmle_imp_idx,
       sl_libs   = sl_libs,
       outcome   = outcome,
+      regimes   = ltmle_regimes,
+      sl_cv_control = sl_cv_control,
       gbound    = cate_gbound
     ),
     pattern   = map(ltmle_imp_idx),
@@ -217,6 +217,8 @@ map_pipe <- tar_map(
       imp_idx   = ltmle_imp_idx,
       sl_libs   = sl_libs,
       outcome   = outcome,
+      regimes   = ltmle_regimes,
+      sl_cv_control = sl_cv_control,
       gbound    = 0.025
     ),
     pattern   = map(ltmle_imp_idx),
