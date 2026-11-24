@@ -1,48 +1,31 @@
-# Pool DR-learner GATE results across imputations with Rubin's rules. Mirrors pool_tmle()
-# Stratum membership is computed on completed data and can in principle vary across imputations
-
+# Pool DR-learner results across imputations with Rubin's rules. Mirrors pool_ltmle(),
+# which does the pooling; diag is a per-stratum overlap check, not a pooled estimate.
+# A stratum can be absent from some imputations (imputed sex/race/hiqual can empty a cell),
+# so each stratum is pooled over the imputations that have it.
 pool_cate <- function(cate_one) {
-  m <- length(cate_one)
-
-  gate_all <- purrr::map_dfr(cate_one, "gate")
-  blp_all  <- purrr::map_dfr(cate_one, "blp")
-  ate_all  <- purrr::map_dfr(cate_one, "ate")
-  wald_all <- purrr::map_dfr(cate_one, "wald")
-
-  pool_pair <- function(Q, U) {
-    pooled <- mice::pool.scalar(Q = Q, U = U, n = Inf, k = 1)
-    se <- sqrt(pooled$t)
-    tibble::tibble(
-      estimate = pooled$qbar,
-      se       = se,
-      ll       = pooled$qbar - 1.96 * se,
-      ul       = pooled$qbar + 1.96 * se
-    )
+  if (!is.null(cate_one$gate)) {
+    stop("pool_cate() got a single estimate_cate() result, not a list of them -- ",
+         "is the upstream target missing pattern = map(ltmle_imp_idx), iteration = \"list\"?",
+         call. = FALSE)
   }
+  # NA when every value is NA, without min()/max() warnings
+  na_safe <- \(f) \(x) if (all(is.na(x))) NA_real_ else f(x, na.rm = TRUE)
 
-  gate <- gate_all |>
-    dplyr::group_by(strata_id, strata_label) |>
-    dplyr::group_modify(function(g, key) {
-      dplyr::bind_cols(
-        pool_pair(g$estimate, g$se^2),
-        tibble::tibble(
-          n_j_min          = min(g$n_j),
-          n_j_max          = max(g$n_j),
-          pct_exposed      = mean(g$pct_exposed),
-          min_g            = min(g$min_g),
-          median_g         = stats::median(g$median_g),
-          share_g_at_bound = mean(g$share_g_at_bound)
-        )
-      )
-    }) |>
-    dplyr::ungroup()
+  diag <- data.table::rbindlist(purrr::map(cate_one, "diag"))[, .(
+    n_j_min          = min(n_j),
+    n_j_max          = max(n_j),
+    n_follow_min     = min(n_follow),
+    pct_follow       = mean(pct_follow),
+    min_g            = na_safe(min)(min_g),
+    median_g         = na_safe(stats::median)(median_g),
+    share_g_at_bound = na_safe(mean)(share_g_at_bound)
+  ), by = .(strata_id, strata_label, regime)]
 
-  blp <- blp_all |>
-    dplyr::group_by(term) |>
-    dplyr::group_modify(function(g, key) pool_pair(g$estimate, g$se^2)) |>
-    dplyr::ungroup()
-
-  ate <- pool_pair(ate_all$estimate, ate_all$se^2)
-
-  list(gate = gate, blp = blp, ate = ate, wald = wald_all, m = m)
+  list(
+    gate    = pool_ltmle(purrr::map(cate_one, "gate"),
+                         by = c("strata_id", "strata_label", "estimand", "type")),
+    overall = pool_ltmle(purrr::map(cate_one, "overall")),
+    diag    = diag,
+    m       = length(cate_one)
+  )
 }
